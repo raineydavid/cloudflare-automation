@@ -1,0 +1,336 @@
+# One bearer for /notify, written to all three places that need it.
+#
+# The first send-test through the Worker reported `bearer: ABSENT`: the
+# runner had no token at all, so scripts/mail_check.py could not even
+# attempt a send. That is not a runner problem. The same value is read
+# by three consumers and there is no single act that sets them:
+#
+#   the Worker      env.NOTIFY_TOKEN — what /notify checks a bearer against
+#   Vercel          api/_mail.py presents it when a receipt needs sending
+#   Actions         scripts/mail_check.py, to prove any of this works
+#
+# Three copies of one secret, set by hand at three different times, is a
+# drift generator. This is the one act.
+#
+# ## NOTIFY_TOKEN, because mail must not govern anything else
+#
+# This minted MCP_TOKEN first, and that value drives three unrelated
+# policies on the Worker: whether /mcp requires a bearer, whether the
+# cost-bearing tools are switched on, and what /notify accepts. So
+# provisioning a mailer CLOSED an MCP surface that was deliberately open
+# and switched generate and publish on — a side effect nobody asked for.
+#
+# Mail gets a name of its own. Once NOTIFY_TOKEN is in place this run
+# REMOVES MCP_TOKEN from the Worker, which puts /mcp back the way it
+# was. That step is last and conditional on mail already working: the
+# order is what makes it safe.
+#
+# ## It will not overwrite a token that already exists
+#
+# `wrangler secret list` returns NAMES, never values, so a token already
+# on the Worker cannot be read back and copied outward. The only way to
+# make the three agree would be to mint a new one — which silently
+# revokes whatever is holding the old one.
+#
+# So a Worker that already has NOTIFY_TOKEN is left alone and this says
+# so. Minting happens only when there is nothing to break.
+#
+# ## What is printed
+#
+# Names, actions and HTTP statuses. The minted value is masked before it
+# is used anywhere, and `vercel_env_sync.py` redacts any declared value
+# that turns up inside an API error message.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/provision-notify-bearer.json
+
+name: provision-notify-bearer
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/provision-notify-bearer.json'
+  workflow_dispatch:
+    inputs:
+      rotate:
+        description: 'Mint a new bearer even though one exists (revokes every current holder)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-notify-bearer
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Same fallback chain as deploy-mcp — the account id has only ever
+      # been reliably present as R2_ACCOUNT_ID.
+      RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - uses: actions/setup-python@v6
+
+      - name: Install
+        run: npm ci
+
+      - name: Resolve account id
+        id: preflight
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      # Names only. This is the whole reason the workflow refuses rather
+      # than rotating: there is no read path for the value.
+      - name: Does the Worker already hold one?
+        id: existing
+        working-directory: workers/mcp
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -euo pipefail
+          npx wrangler@4 secret list > /tmp/secrets.out 2>/tmp/secrets.err || {
+            echo "::error::could not list the Worker's secrets: $(head -c 300 /tmp/secrets.err)"
+            exit 1
+          }
+          # An empty list is a real answer; not RECOGNISING the output is
+          # not, and the parser keeps them apart — see the script. If the
+          # two collapsed, a cosmetic change to wrangler's output would
+          # read as "no token held" and mint over a live one.
+          HELD=$(python3 "$GITHUB_WORKSPACE/scripts/worker_secret_names.py" /tmp/secrets.out) || {
+            echo "::error::could not read the Worker's secret NAMES out of: $(head -c 300 /tmp/secrets.out). Refusing rather than assuming there is no token to overwrite."
+            exit 1
+          }
+          echo "[worker] holds: ${HELD:-(none)}"
+          if printf '%s' "$HELD" | tr ' ' '\n' | grep -qx NOTIFY_TOKEN; then
+            echo "has=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=no" >> "$GITHUB_OUTPUT"
+          fi
+          # Whether there is an MCP_TOKEN to retire once mail has its own
+          # name. Its presence is what closed /mcp.
+          if printf '%s' "$HELD" | tr ' ' '\n' | grep -qx MCP_TOKEN; then
+            echo "mcp=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "mcp=no" >> "$GITHUB_OUTPUT"
+          fi
+          # The prefixed name is what wrangler.toml's comment used to
+          # claim. Nothing reads it, so a Worker carrying only that one
+          # is fail-closed while looking configured — worth naming
+          # rather than leaving to be rediscovered.
+          if printf '%s' "$HELD" | tr ' ' '\n' | grep -qx ONTOLD_MCP_TOKEN; then
+            echo "::warning::the Worker holds ONTOLD_MCP_TOKEN, which nothing reads. Delete it."
+          fi
+
+      - name: Decide
+        id: plan
+        run: |
+          set -euo pipefail
+          WANT_ROTATE="${{ github.event_name == 'workflow_dispatch' && inputs.rotate || 'false' }}"
+          if [ "${{ steps.existing.outputs.has }}" = "no" ]; then
+            echo "mint=yes" >> "$GITHUB_OUTPUT"
+            echo "[plan] no NOTIFY_TOKEN on the Worker — minting one and writing all three copies"
+          elif [ "$WANT_ROTATE" = "true" ]; then
+            echo "mint=yes" >> "$GITHUB_OUTPUT"
+            echo "::warning::rotating an existing bearer — every current holder stops working the moment this lands"
+          else
+            echo "mint=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::the Worker already holds NOTIFY_TOKEN and its value cannot be read back, so nothing was changed. If Vercel or Actions disagree with it, re-run with rotate ticked (which revokes every current holder) or set the same value by hand in the two that are missing it."
+          fi
+
+      - name: Mint, and give it to the Worker
+        id: mint
+        if: steps.plan.outputs.mint == 'yes'
+        working-directory: workers/mcp
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -euo pipefail
+          VALUE=$(openssl rand -hex 32)
+          echo "::add-mask::$VALUE"
+          # The Worker FIRST. It is the thing that checks the bearer, so
+          # a failure here must not leave the other two holding a value
+          # nothing accepts.
+          printf '%s' "$VALUE" | npx wrangler@4 secret put NOTIFY_TOKEN 2>/tmp/put.err >/dev/null || {
+            echo "::error::could not set NOTIFY_TOKEN on the Worker: $(head -c 300 /tmp/put.err)"
+            exit 1
+          }
+          echo "[worker] NOTIFY_TOKEN set"
+          echo "value=$VALUE" >> "$GITHUB_OUTPUT"
+
+      - name: Give it to Actions
+        if: steps.plan.outputs.mint == 'yes'
+        env:
+          VALUE: ${{ steps.mint.outputs.value }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+          GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+          GH_APP_ID: ${{ secrets.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Keep the script's stderr: it distinguishes "no installation"
+          # from "installations exist but none is this owner" from "the
+          # mint itself failed", and discarding it leaves only the fact
+          # that something returned nothing.
+          APP=$(node scripts/mint_app_token.mjs 2>/tmp/app_err || true)
+          # `|| true` because this is the last command on the line and an
+          # empty diagnostics file would otherwise end the step under
+          # `set -e` — a successful mint killed by having nothing to say.
+          { [ -s /tmp/app_err ] && echo "[store] $(tr '\n' ' ' < /tmp/app_err)"; } || true
+          if [ -z "$APP" ]; then
+            echo "::error::no app installation token for '${GITHUB_ORG}' — $(tr '\n' ' ' < /tmp/app_err). It needs Secrets: read and write on ${GITHUB_REPOSITORY}."
+            exit 1
+          fi
+          echo "::add-mask::$APP"
+          if ! GH_TOKEN="$APP" gh secret set NOTIFY_TOKEN --repo "$GITHUB_REPOSITORY" --body "$VALUE" 2>/tmp/gherr; then
+            echo "::error::cannot write secrets to ${GITHUB_REPOSITORY}: $(head -c 200 /tmp/gherr)"
+            exit 1
+          fi
+          echo "[store] NOTIFY_TOKEN set on ${GITHUB_REPOSITORY}"
+
+      # Vercel LAST. api/_mail.py is the consumer that matters least for
+      # proving this works — mail_check.py goes straight at the Worker —
+      # and it is the one write that touches the platform serving the
+      # site, so it happens once the other two are known good.
+      - name: Give it to Vercel
+        id: vercel
+        if: steps.plan.outputs.mint == 'yes'
+        env:
+          NOTIFY_TOKEN: ${{ steps.mint.outputs.value }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "::warning::no VERCEL_TOKEN — the Worker and Actions agree, but api/_mail.py on Vercel still has the old value and receipts will not send until NOTIFY_TOKEN is set there."
+            exit 0
+          fi
+          python3 scripts/vercel_env_sync.py --target preview,production --apply
+
+      # Now put /mcp back.
+      #
+      # MCP_TOKEN was minted here to make mail work, and it also closed
+      # an MCP surface that was deliberately open and switched the
+      # cost-bearing tools on — index.mjs requires a bearer whenever it
+      # is set, and tools.mjs reads its presence as the enable flag.
+      # Neither was asked for.
+      #
+      # PROVING MAIL FIRST is what makes this safe, so it runs only
+      # after NOTIFY_TOKEN is on the Worker and the route accepts it.
+      # Removing MCP_TOKEN before that would take mail down to fix a
+      # surface, which is the wrong order.
+      #
+      # A warning rather than a failure: the bearer is provisioned
+      # either way, and a Worker that keeps MCP_TOKEN is exactly where
+      # this run started rather than somewhere worse.
+      #
+      # always(), and NOT gated on the job so far. The first attempt was
+      # written without it and got skipped, because the Vercel write
+      # ahead of it failed on a token scoped to another team — an
+      # unrelated consumer, and the least important one, silently
+      # deciding whether /mcp gets reopened. What this step depends on is
+      # the mint, and it says so.
+      - name: Reopen /mcp
+        id: reopen
+        # Runs on a RE-RUN too, not only on the run that minted. A
+        # second attempt finds NOTIFY_TOKEN already on the Worker and
+        # mints nothing, and gating on the mint would make the reopen
+        # unreachable for good — the value is in this repository's
+        # secrets by then, which is all the probe below needs.
+        if: >-
+          always()
+          && steps.existing.outputs.mcp == 'yes'
+          && (steps.mint.outcome == 'success' || steps.existing.outputs.has == 'yes')
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          NOTIFY_TOKEN: ${{ steps.mint.outputs.value || secrets.NOTIFY_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The route has to accept the new name before the old one goes.
+          # An unauthenticated POST answers 401 when a bearer is
+          # configured and 503 when none is — so this distinguishes "the
+          # Worker is running code that knows NOTIFY_TOKEN" from "it is
+          # not" without presenting a credential.
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://mcp.ontold.site/notify \
+            -H 'content-type: application/json' -H 'user-agent: ontold/1.0' --data '{}' || echo 000)
+          if [ "$CODE" != "401" ]; then
+            echo "::warning::/notify answered $CODE to an unauthenticated POST, not 401 — it is not running a build that accepts NOTIFY_TOKEN, so MCP_TOKEN stays. Deploy the Worker and re-run."
+            exit 0
+          fi
+          # And that the new bearer actually works, before removing the
+          # one that currently does. 400 means authorised and the empty
+          # body was rejected, which is the answer we want without
+          # sending anybody a message.
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://mcp.ontold.site/notify \
+            -H "authorization: Bearer ${NOTIFY_TOKEN}" \
+            -H 'content-type: application/json' -H 'user-agent: ontold/1.0' --data '{}' || echo 000)
+          if [ "$CODE" = "401" ] || [ "$CODE" = "000" ]; then
+            echo "::warning::the Worker did not accept NOTIFY_TOKEN (HTTP $CODE) — MCP_TOKEN stays, because removing it would leave nothing that can send."
+            exit 0
+          fi
+          echo "[mcp] /notify accepts NOTIFY_TOKEN (HTTP $CODE) — retiring MCP_TOKEN"
+          # Over the API rather than `wrangler secret delete`, which
+          # asks for confirmation and has no answer on a runner.
+          RESP=$(curl -sS -X DELETE \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/ontold-mcp/secrets/MCP_TOKEN" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" || echo '{}')
+          if printf '%s' "$RESP" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") else 1)' 2>/dev/null; then
+            echo "::notice::MCP_TOKEN removed — /mcp is open again and the cost-bearing tools are back off, as they were before mail was provisioned."
+            echo "done=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not remove MCP_TOKEN ($(printf '%s' "$RESP" | tr -d '\n' | cut -c1-200)) — /mcp stays closed. Mail is unaffected."
+          fi
+
+      # always(), because a partial provision is the state most worth
+      # reporting and the one a failed step hides. The first run got the
+      # Worker and this repository and then lost Vercel to a token
+      # scoped elsewhere — and said none of that, because this step was
+      # skipped and the run read as a flat failure.
+      - name: Say where it stands
+        if: always()
+        run: |
+          set -euo pipefail
+          say() { echo "- $1 $2" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "### /notify bearer" >> "$GITHUB_STEP_SUMMARY"
+          # No early exit. A run that minted nothing can still have done
+          # the thing it was asked for — this one retired MCP_TOKEN and
+          # reported "Unchanged", which is a summary describing a
+          # different run than the one that happened.
+          if [ "${{ steps.plan.outputs.mint }}" != "yes" ]; then
+            echo "Bearer unchanged — the Worker already holds one, and its value cannot be read back." >> "$GITHUB_STEP_SUMMARY"
+          else
+            case "${{ steps.mint.outcome }}"  in success) say "✅" "Worker — /notify accepts it";;      *) say "❌" "Worker";;      esac
+            case "${{ steps.vercel.outcome }}" in
+              success) say "✅" "Vercel — api/_mail.py can present it";;
+              skipped) say "—" "Vercel — not reached";;
+              *)       say "❌" "Vercel — api/_mail.py still has the old value, so a receipt will not send. Fix the VERCEL_TOKEN scope, then run sync-vercel-env with apply; it carries NOTIFY_TOKEN.";;
+            esac
+            # Actions has no step id of its own to read: it is the step
+            # between those two and either it wrote the secret or the job
+            # stopped there.
+            if [ "${{ steps.mint.outcome }}" = success ] && [ "${{ steps.vercel.outcome }}" != skipped ]; then
+              say "✅" "This repository — mail_check.py can prove a send"
+            fi
+          fi
+          case "${{ steps.reopen.outputs.done }}" in
+            yes) say "✅" "/mcp — open again, and the cost-bearing tools back off";;
+            *)   [ "${{ steps.reopen.outcome }}" = skipped ] || say "⚠️" "/mcp — still closed by MCP_TOKEN; mail is unaffected";;
+          esac
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Next: push \`.github/dispatch-requests/send-test-email.json\` to prove a send." >> "$GITHUB_STEP_SUMMARY"

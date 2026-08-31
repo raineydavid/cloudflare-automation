@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+__pycache__/
+
+# Generated API reference (npm run docs:all). Internal-only by
+# construction — regenerate on demand, never commit or ship (I9).
+internal/apidocs/
+coverage/
+dev/signup-runs/
+
+# Build output. `npx esbuild scaffolding/renderEntry.ts ... --outfile=build/render.mjs`
+# puts the renderer bundle here, and scripts/generate_site.mjs writes
+# generated pages to build/sites/. All of it is reproducible from the
+# spec plus the source, which is the whole point — committing it would
+# be committing a cache.
+build/
+
+# Remotion render output. The MP4 that ships is committed to public/ by
+# render-conversation.yml; everything else here is bundler scratch.
+remotion/out/
+remotion/node_modules/

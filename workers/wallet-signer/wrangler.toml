@@ -1,0 +1,7 @@
+name = "workais-wallet-signer"
+main = "src/index.mjs"
+compatibility_date = "2026-07-01"
+
+# Secrets (set via `wrangler secret put` or the deploy workflow):
+#   WALLET_PRIVATE_KEY — the stablecoin wallet key (0x…). NEVER in git.
+#   SIGNER_AUTH        — bearer token WorkAIs presents (SPEND_SIGNER_AUTH).

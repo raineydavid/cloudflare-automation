@@ -1,0 +1,6 @@
+{
+  "bucket": "ontold-public",
+  "domain": "media.ontold.com",
+  "apply": true,
+  "why": "Retry the secret write with GITHUB_ORG set, and list every repository secret by name so the founder can see what is there rather than take my word."
+}

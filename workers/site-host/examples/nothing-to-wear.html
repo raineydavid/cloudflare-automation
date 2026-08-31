@@ -1,0 +1,1748 @@
+<!DOCTYPE html>
+<!--
+  nothing-to-wear.ontold.site — the interactive example.
+
+  Founder (2026-07-31): build it with a simulated wardrobe now, and let
+  people remix it with their real one. So this page goes as far toward a
+  real digital wardrobe as a single published HTML document honestly
+  can, and hands off to the studio at exactly the points where it
+  cannot go further.
+
+  ## The honesty rule this page is built under
+
+  Everything here is computed from data that is actually present. There
+  is no fetched forecast, no model call, no photo upload and no
+  generated try-on — a published Ontold site is one document served from
+  storage, with no server behind it, and pretending otherwise in a demo
+  would be lying about the product in the product.
+
+  Where the real thing needs a backend, the page says so and offers the
+  studio instead:
+    - a live forecast needs a key we cannot put in a public page, so the
+      trip planner asks you what it will be doing rather than guessing
+    - photographing a garment needs upload + an edit model
+    - seeing yourself in a look needs cast grounding + render-to-real
+  Those three are the boundary between a published page and the studio,
+  and the page names it rather than blurring it.
+
+  ## What IS real here
+
+  Everything else, derived at run time from per-garment fields:
+    - the colour match is arithmetic — nearest shade in the palette by
+      RGB distance, reported as distance, not as a mystical score
+    - looks are enumerated from occasion, weather and mood, including
+      dress-based looks that skip the top/bottom slots entirely
+    - the packing capsule is chosen by outfits-per-piece, which is what
+      packing light actually optimises for
+    - the gaps are counted, not asserted: the page can only say a slot
+      is thin because it looked
+
+  A hardcoded outfit list with hand-written blurbs would look identical
+  on day one and start lying the moment a garment changed. Deriving
+  everything is what keeps the copy true.
+
+  ## Why it looks nothing like Ontold
+
+  A customer's site should look like the customer. The front door wears
+  the brand palette; a wardrobe wears its own. That contrast is the
+  demonstration — generated sites are not one template recoloured.
+
+  Self-contained by requirement: no external CSS, fonts, scripts or
+  images. Garments are drawn as inline SVG, which is also honest —
+  there is no real inventory behind this page.
+-->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nothing to Wear — everything you own, in one place</title>
+<meta name="description" content="An interactive example published on Ontold. Ask what to wear, see your colour family, open a piece to see what it pairs with, and pack a capsule — all from a simulated wardrobe you can remix with your own.">
+<meta name="theme-color" content="#F7F4EF">
+<style>
+  /* ── Nothing to Wear ──────────────────────────────────────────
+     Founder: "it looks great but it doesnt resemble the image i just
+     uploaded - which makes it reusable and more relevant but misses the
+     additional parts."
+
+     So: the mockup's SHAPE, because an app shell generalises to any
+     wardrobe and a poster does not — plus the reasoning the mockup has
+     nowhere to put. Sidebar, hero, outfit cards, a planned week, and a
+     right rail of insights; and behind every card the colour, shape,
+     compromise, grooming and storage this thing already derives.
+
+     One rule inherited from everything else here: every number on this
+     page is COMPUTED. The mockup shows "using 68% of your wardrobe",
+     "most worn", "not worn in 32 days" — all of which need wear history
+     we do not have. Rather than print invented figures, the same panels
+     show facts the rail can actually prove: how many pieces reach a
+     complete look, which appear in the most, which appear in none.
+     ───────────────────────────────────────────────────────────── */
+  :root{
+    --paper:#FBFAF8; --panel:#FFFFFF; --ink:#111112; --dim:#6E6E73;
+    --line:#E8E5E0; --hot:#111112; --accent:#C7442A; --plate:#F6F4F1;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:var(--paper)}
+  body{color:var(--ink);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .serif{font-family:ui-serif,Georgia,"Times New Roman",serif}
+
+  /* Shell */
+  .top{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    padding:1.15rem clamp(1rem,3vw,2rem);border-bottom:1px solid var(--line);background:var(--panel)}
+  .brand{font-family:ui-serif,Georgia,serif;font-size:1.55rem;letter-spacing:-.02em}
+  .top .who{display:flex;align-items:center;gap:.6rem;color:var(--dim);font-size:13.5px}
+  .avatar{width:32px;height:32px;border-radius:50%;background:var(--plate);
+    display:grid;place-items:center;font-size:12px;font-weight:700;color:var(--dim)}
+  .shell{display:grid;grid-template-columns:210px minmax(0,1fr) 300px;gap:0;align-items:start}
+  @media (max-width:1180px){.shell{grid-template-columns:180px minmax(0,1fr)}.rail-right{display:none}}
+  @media (max-width:820px){.shell{grid-template-columns:1fr}.side{display:none}}
+  .side{padding:1.4rem 1rem;border-right:1px solid var(--line);min-height:calc(100vh - 64px);position:sticky;top:0}
+  .side h4{font:700 9.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--dim);margin:1.9rem 0 .7rem;padding:0 .6rem}
+  .nav{display:flex;flex-direction:column;gap:.15rem}
+  .nav a,.nav button{display:flex;align-items:center;gap:.65rem;padding:.6rem .7rem;border-radius:9px;
+    color:var(--ink);text-decoration:none;font-size:14px;background:none;border:none;
+    cursor:pointer;text-align:left;width:100%;font-family:inherit}
+  .nav a:hover,.nav button:hover{background:var(--plate)}
+  .nav .on{background:var(--plate);font-weight:600}
+  .nav .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+  .main{padding:clamp(1.2rem,3vw,2rem);min-width:0}
+  .rail-right{padding:clamp(1.2rem,3vw,2rem) clamp(1rem,2vw,1.5rem);border-left:1px solid var(--line);
+    position:sticky;top:0}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px}
+  .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:center;
+    padding:clamp(1.5rem,4vw,2.6rem);margin-bottom:2rem}
+  @media (max-width:720px){.hero{grid-template-columns:1fr}}
+  .hero h1{font-family:ui-serif,Georgia,serif;font-weight:400;
+    font-size:clamp(1.7rem,3.6vw,2.6rem);line-height:1.1;letter-spacing:-.03em;margin:0 0 .8rem}
+  .hero p{color:var(--dim);margin:0 0 1.5rem;max-width:36ch;font-size:15px}
+  .btn{appearance:none;border:none;background:var(--ink);color:#fff;cursor:pointer;
+    font:600 13.5px/1 inherit;padding:.95rem 1.5rem;border-radius:100px;text-decoration:none;
+    display:inline-flex;align-items:center;gap:.5rem;transition:transform .16s,opacity .16s}
+  .btn.line{background:none;color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+  .btn:hover{transform:translateY(-1px);opacity:.9}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+  /* The flat-lay: the outfit as ONE composition, not a row of items. */
+  .lay{position:relative;height:clamp(180px,24vw,270px);display:flex;align-items:center;
+    justify-content:center}
+  .lay figure{margin:0;position:absolute}
+  .lay img,.lay svg{width:100%;height:100%;object-fit:contain;display:block;
+    filter:drop-shadow(0 10px 22px rgba(17,17,18,.10))}
+
+  .row-head{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;margin:0 0 1rem}
+  .row-head h2{font-family:ui-serif,Georgia,serif;font-weight:400;font-size:1.5rem;
+    letter-spacing:-.02em;margin:0}
+  .row-head a,.row-head button{color:var(--dim);font-size:13px;background:none;border:none;
+    cursor:pointer;text-decoration:underline;font-family:inherit}
+  .ideas{display:grid;gap:1rem;grid-template-columns:repeat(auto-fill,minmax(min(190px,45vw),1fr));margin-bottom:2.2rem}
+  .idea{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:.9rem;
+    cursor:pointer;text-align:left;font:inherit;color:inherit;transition:transform .18s,box-shadow .18s}
+  .idea:hover{transform:translateY(-3px);box-shadow:0 18px 34px -26px rgba(17,17,18,.55)}
+  .idea:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .idea .lay{height:clamp(140px,17vw,180px)}
+  .idea h3{font-size:14px;font-weight:600;margin:.7rem 0 .15rem;letter-spacing:-.01em}
+  .idea p{margin:0;font-size:12px;color:var(--dim)}
+
+  /* The week */
+  .week{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:2.2rem}
+  .day{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:.7rem;
+    cursor:pointer;font:inherit;color:inherit;text-align:left}
+  .day:hover{border-color:var(--ink)}
+  .day b{display:block;font-size:12.5px;font-weight:600}
+  .day span{display:block;font-size:11px;color:var(--dim);margin-bottom:.4rem}
+  .day .lay{height:104px}
+
+  /* Right rail */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:1.1rem;margin-bottom:1rem}
+  .panel h3{font-size:14px;font-weight:600;margin:0 0 .9rem;letter-spacing:-.01em}
+  .counts{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem;text-align:center}
+  .counts div b{display:block;font-size:15px;font-weight:600}
+  .counts div span{display:block;font-size:10.5px;color:var(--dim);margin-top:.15rem}
+  .meter{height:7px;border-radius:99px;background:var(--plate);overflow:hidden;margin:.7rem 0 .6rem}
+  .meter i{display:block;height:100%;background:var(--ink)}
+  .panel p.note{font-size:12.5px;color:var(--dim);margin:0 0 .9rem}
+  .insight{border-top:1px solid var(--line);padding:.85rem 0 0;margin-top:.85rem}
+  .insight:first-of-type{border-top:none;padding-top:0;margin-top:0}
+  .insight b{display:block;font-size:13px;font-weight:600;margin-bottom:.2rem}
+  .insight p{margin:0;font-size:12.5px;color:var(--dim)}
+  .dots{display:flex;gap:.3rem;margin-top:.5rem}
+  .dots span{width:17px;height:17px;border-radius:50%;border:1px solid var(--line)}
+
+  /* Sections revealed by the sidebar */
+  .view{display:none} .view.on{display:block}
+  .bands{display:flex;flex-wrap:wrap;gap:2px;border-radius:12px;overflow:hidden}
+  .band{flex:1 1 96px;height:clamp(78px,10vw,124px);position:relative;display:flex;align-items:flex-end;padding:.6rem}
+  .band b{font:600 10px/1.3 inherit}
+  .band i{position:absolute;top:.55rem;left:.6rem;font-style:normal;
+    font:700 7.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.14em;opacity:.85}
+  .filters{display:flex;gap:1.3rem;flex-wrap:wrap;margin:0 0 1.3rem}
+  .filters button{background:none;border:none;color:var(--dim);cursor:pointer;padding:0;
+    font:600 10.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.16em;text-transform:uppercase}
+  .filters button[aria-pressed="true"]{color:var(--ink);text-decoration:underline;
+    text-underline-offset:.45em;text-decoration-thickness:2px}
+  .rail{display:grid;gap:1rem;grid-template-columns:repeat(auto-fill,minmax(min(180px,44vw),1fr))}
+  .piece{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:.85rem;
+    cursor:pointer;text-align:left;font:inherit;color:inherit;transition:transform .18s}
+  .piece:hover{transform:translateY(-3px)}
+  .piece:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .piece .plate{background:var(--plate);border-radius:9px;padding:.7rem;margin-bottom:.6rem;display:block}
+  .piece img,.piece svg{width:100%;height:clamp(120px,15vw,168px);object-fit:contain;display:block}
+  .piece h3{font-size:13.5px;font-weight:600;margin:0;letter-spacing:-.01em}
+  .piece p{margin:.15rem 0 0;font-size:11.5px;color:var(--dim)}
+  .tag{font:700 8.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;
+    margin-top:.45rem;display:block}
+  .in{color:#4F7A46} .near{color:#9A7B10} .out{color:var(--accent)}
+  .figs{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:1.6rem}
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1rem}
+  .fig b{display:block;font-family:ui-serif,Georgia,serif;font-weight:400;font-size:2.1rem;line-height:1}
+  .fig span{display:block;font:700 9px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--dim);margin-top:.5rem}
+  /* ── Where it all lives ──────────────────────────────────────
+     Founder: "should we also do faux places where they are stored".
+     Every garment already carried a `spot` — "Rail, right end",
+     "Shoe box, under the bed" — and it was only ever printed as a line
+     of text on a detail panel. A wardrobe is not a grid, it is places
+     in a home, and half of having nothing to wear is forgetting what
+     is in the one you never open. */
+  .places{display:grid;gap:.9rem;grid-template-columns:repeat(auto-fill,minmax(min(240px,46vw),1fr))}
+  .place{border:1px solid var(--line);border-radius:12px;padding:.95rem 1.05rem;background:#fff}
+  .place-h{display:flex;align-items:baseline;justify-content:space-between;gap:.75rem;margin:0 0 .55rem}
+  .place-h b{font-weight:600;font-size:13.5px}
+  .place-h span{font:500 11px/1 ui-monospace,Menlo,monospace;color:var(--dim);white-space:nowrap}
+  .place ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.3rem}
+  .place li{font-size:12px;color:var(--dim);background:var(--wash);
+    border-radius:999px;padding:.2rem .55rem}
+  .place li.on{color:var(--ink);background:#EFE9DF;font-weight:500}
+  .place .note{margin:.55rem 0 0;font-size:12px;color:var(--dim);font-style:italic}
+  .place.cold{border-style:dashed}
+  /* ── The studio hand-off ─────────────────────────────────────
+     The page named its three AI boundaries in a footer disclaimer and
+     nowhere else, so the most interesting thing about it read as an
+     apology. They are the reason to open the studio. */
+  .ai{display:grid;gap:.9rem;grid-template-columns:repeat(auto-fit,minmax(min(250px,46vw),1fr));margin:0 0 1.5rem}
+  .ai-card{border:1px solid var(--line);border-radius:12px;padding:1.05rem 1.15rem;background:#fff;
+    display:flex;flex-direction:column;gap:.45rem}
+  .ai-card b{font-size:14px;font-weight:600}
+  .ai-card p{margin:0;font-size:13px;color:var(--dim);flex:1}
+  .ai-card .why{font-size:11.5px;color:var(--dim);font-style:italic;
+    border-top:1px solid var(--line);padding-top:.5rem;margin-top:.2rem}
+  .ai-card a{margin-top:.35rem;font-size:13px;font-weight:600;color:var(--ink);
+    text-decoration:none;border-bottom:1.5px solid var(--accent);align-self:flex-start;padding-bottom:1px}
+  .ai-card a:hover{color:var(--accent)}
+  /* Buy similar. Founder: "we have a shopping module buy similar -
+     outfit? in the daily micros" — outfit, yes: the micros shop the
+     whole look, and nobody wants one sleeve of it. */
+  .shopline{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    margin:1rem 0 0;padding:.85rem 1rem;background:var(--wash);border-radius:10px}
+  .shopline span{font-size:12.5px;color:var(--dim)}
+  .shopline a{font-size:13px;font-weight:600;color:var(--ink);text-decoration:none;
+    border-bottom:1.5px solid var(--accent);padding-bottom:1px;white-space:nowrap}
+  .shopline a:hover{color:var(--accent)}
+  .gap{display:flex;justify-content:space-between;gap:1.5rem;padding:.9rem 0;
+    border-top:1px solid var(--line);font-size:14px;flex-wrap:wrap}
+  .gap em{font-style:italic;color:var(--accent)}
+  .gap .n{font:500 11.5px/1 ui-monospace,Menlo,monospace;color:var(--dim);white-space:nowrap}
+  .sub{color:var(--dim);max-width:52ch;margin:0 0 1.4rem;font-size:14px}
+
+  /* Sheet — where the depth lives */
+  .drawer{position:fixed;inset:0;background:rgba(17,17,18,.4);display:none;align-items:center;
+    justify-content:center;z-index:40;padding:1rem}
+  .drawer[open]{display:flex}
+  .sheet{background:var(--panel);width:min(880px,100%);max-height:92vh;overflow:auto;
+    border-radius:18px;padding:clamp(1.3rem,3vw,2.2rem)}
+  .sheet-head{display:flex;gap:1.4rem;align-items:flex-start;margin-bottom:1.2rem}
+  .sheet-head .lay{flex:0 0 clamp(180px,30vw,330px);height:clamp(150px,20vw,210px)}
+  .sheet h3{font-family:ui-serif,Georgia,serif;font-weight:400;font-size:clamp(1.4rem,3vw,2rem);
+    letter-spacing:-.025em;margin:0 0 .25rem}
+  .sheet .price{font:500 12.5px/1 ui-monospace,Menlo,monospace;color:var(--dim)}
+  .close{margin-left:auto;background:none;border:1px solid var(--line);color:var(--dim);
+    width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:16px;flex:0 0 auto}
+  .close:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .reasons{margin:0;padding:0;list-style:none}
+  .reasons li{padding:.85rem 0;border-top:1px solid var(--line);font-size:14px}
+  .reasons li b{display:block;font:700 9px/1 ui-monospace,Menlo,monospace;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--dim);margin-bottom:.38rem}
+  .reasons li.warn{color:var(--accent)}
+  .where span{display:block;font-size:12.5px;color:var(--dim);padding:.12rem 0}
+  .sheet .lbl{font:700 9px/1 ui-monospace,Menlo,monospace;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--dim);margin:1.6rem 0 .5rem}
+  .steps{margin:0;padding:0;list-style:none;counter-reset:s}
+  .steps li{counter-increment:s;display:flex;gap:.8rem;align-items:baseline;
+    padding:.55rem 0;border-top:1px solid var(--line);font-size:14px}
+  .steps li::before{content:counter(s);flex:0 0 22px;height:22px;border-radius:50%;
+    background:var(--plate);color:var(--dim);align-self:flex-start;
+    font:600 11px/22px ui-monospace,Menlo,monospace;text-align:center}
+  .steps em{font-style:normal;color:var(--dim)}
+  .swatches{display:flex;flex-wrap:wrap;gap:.55rem;margin:.2rem 0 0}
+  .swatch{width:74px}
+  .swatch i{display:block;height:44px;border-radius:8px;border:1px solid rgba(0,0,0,.12)}
+  .swatch b{display:block;font:500 10px/1.35 ui-monospace,Menlo,monospace;color:var(--dim);
+    letter-spacing:0;text-transform:none;margin-top:.32rem}
+  .pairs{display:grid;gap:.5rem;margin-top:1.2rem}
+  .pair{display:flex;gap:.8rem;align-items:center;border:1px solid var(--line);border-radius:11px;padding:.6rem}
+  .pair .plate{background:var(--plate);border-radius:7px;padding:.35rem;flex:0 0 52px}
+  .pair img,.pair svg{width:100%;height:52px;object-fit:contain;display:block}
+  .pair .why{color:var(--dim);font-size:12px;margin-top:.15rem}
+  .empty{color:var(--dim);font-style:italic}
+  footer{padding:2rem clamp(1.2rem,3vw,2rem) 3rem;color:var(--dim);font-size:12px;
+    line-height:1.75;max-width:78ch;border-top:1px solid var(--line);margin-top:2rem}
+  footer strong{color:var(--ink)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style></head>
+<body>
+<div class="top">
+  <span class="brand">nothing to wear</span>
+  <div class="who"><span id="who-count">Your rail</span><span class="avatar">NW</span></div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <nav class="nav" id="nav">
+      <button type="button" data-view="home" class="on">Home</button>
+      <button type="button" data-view="wardrobe">My Wardrobe</button>
+      <button type="button" data-view="looks">Looks</button>
+      <button type="button" data-view="calendar">Calendar</button>
+      <button type="button" data-view="packing">Packing</button>
+      <button type="button" data-view="colour">Colour</button>
+    </nav>
+    <h4>Today</h4>
+    <div class="nav" id="axes"></div>
+    <h4>Quick actions</h4>
+    <div class="nav">
+      <a id="ho-add" href="https://ontold.com/">Add clothes</a>
+      <a id="ho-tryon" href="https://ontold.com/">See it on me</a>
+      <a id="ho-remix" href="https://ontold.com/">Make mine</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="view on" data-pane="home">
+      <div class="card hero">
+        <div>
+          <h1 id="hero-h">We'll help you make the most of what you already have.</h1>
+          <p id="hero-p">A full rail and nothing to wear. Tell it the day and it builds the
+            look out of what&rsquo;s already there.</p>
+          <button class="btn" type="button" id="shuffle">Show me another look</button>
+        </div>
+        <div class="lay" id="hero-lay"></div>
+      </div>
+
+      <div class="row-head">
+        <h2 id="ideas-h">Outfit ideas for you</h2>
+        <button type="button" data-view="looks">See all</button>
+      </div>
+      <div class="ideas" id="ideas"></div>
+
+      <div class="row-head">
+        <h2>Plan your looks</h2>
+        <button type="button" data-view="calendar">See calendar</button>
+      </div>
+      <div class="week" id="week"></div>
+
+      <!-- Founder: "the home page should be my wardrobe as well." The
+           home pane showed what to WEAR and never what you OWN, which
+           on a page called Nothing to Wear is the wrong half. Same
+           renderer as the wardrobe pane, cut to a strip. -->
+      <div class="row-head" style="margin-top:2.4rem">
+        <h2>My wardrobe</h2>
+        <button type="button" data-view="wardrobe">See all</button>
+      </div>
+      <p class="sub" id="home-rail-sub"></p>
+      <div class="rail" id="home-rail"></div>
+    </section>
+
+    <section class="view" data-pane="wardrobe">
+      <div class="row-head"><h2>My wardrobe</h2></div>
+      <p class="sub">Everything you own, whether or not it suits today. Open a piece for what
+        it goes with and which drawer it&rsquo;s in.</p>
+      <div class="filters" role="group" aria-label="Filter by category" id="filters"></div>
+      <div class="rail" id="rail"></div>
+      <p class="empty" id="empty" hidden>Nothing in that part of the wardrobe.</p>
+    </section>
+
+    <section class="view" data-pane="looks">
+      <div class="row-head"><h2 id="looks-h">Every look for today</h2></div>
+      <p class="sub" id="looks-sub"></p>
+      <div class="ideas" id="all-looks"></div>
+    </section>
+
+    <section class="view" data-pane="calendar">
+      <div class="row-head"><h2>The week</h2></div>
+      <p class="sub">Seven days planned off the same rail, no outfit repeated. Change the
+        weather or the mood in the sidebar and the week re-plans.</p>
+      <div class="week" id="full-week"></div>
+    </section>
+
+    <section class="view" data-pane="packing">
+      <div class="row-head"><h2>Packing</h2></div>
+      <p class="sub">Chosen by outfits-per-piece, which is what packing light actually
+        optimises for. No forecast is fetched &mdash; a weather key in a public page would be
+        a public key &mdash; so it packs for the weather you set.</p>
+      <div class="figs" id="trip-figs"></div>
+      <div class="lay" id="trip-lay" style="height:auto;flex-wrap:wrap;gap:.5rem;position:static;justify-content:flex-start"></div>
+      <div class="row-head" style="margin-top:2.4rem"><h2>Where it all lives</h2></div>
+      <p class="sub" id="places-sub">Every piece lives somewhere. The drawer you never open
+        is not a metaphor &mdash; it is counted below.</p>
+      <div class="places" id="places"></div>
+
+      <div class="row-head" style="margin-top:2.4rem"><h2>What this page can&rsquo;t do</h2></div>
+      <p class="sub">Three things this wardrobe wants need a model behind it.</p>
+      <div class="ai" id="ai"></div>
+
+      <div class="row-head" style="margin-top:2.4rem"><h2>Where the gaps are</h2></div>
+      <p class="sub">Counted, not guessed. Sometimes you really do have nothing to wear.</p>
+      <div id="gaps"></div>
+    </section>
+
+    <section class="view" data-pane="colour">
+      <div class="row-head"><h2>Your colour family</h2></div>
+      <p class="sub">A Deep Winter palette. Every piece is placed against it by arithmetic
+        &mdash; how far its own colour sits from the nearest shade &mdash; so the verdict is
+        checkable, and sometimes unflattering.</p>
+      <div class="bands" id="families"></div>
+    </section>
+  </main>
+
+  <aside class="rail-right">
+    <div class="panel">
+      <h3>Your wardrobe</h3>
+      <div class="counts" id="counts"></div>
+    </div>
+    <div class="panel" id="usage"></div>
+    <div class="panel" id="insights"></div>
+  </aside>
+</div>
+
+<footer>
+  <!-- Founder: "there's too much text on bottom left - its meant to
+       look like a real site not a template." It was seventy words of
+       caveat, and most of it was us narrating our own architecture:
+       written by hand rather than generated, fetches no forecast,
+       uploads no photo, computes from the rail rather than wear
+       history. None of that is a visitor's business, all of it reads
+       as a demo apologising for itself, and the parts worth saying
+       now have a section of their own.
+
+       What stays is what a visitor could otherwise get wrong: this is
+       an example, and there is nothing here to buy. -->
+  <p><strong>nothing-to-wear.ontold.site</strong> &mdash; made with
+    <a href="https://ontold.com/">Ontold</a>.</p>
+</footer>
+
+<div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+  <div class="sheet" id="sheet"></div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  // ── The palette ────────────────────────────────────────────────
+  // A Deep Autumn analysis, as DATA. Every match score on the page is
+  // RGB distance to the nearest shade here, so the palette is the only
+  // place the styling opinion lives.
+  var FAMILIES = [
+    { name:'Neutrals', shades:[
+      ['True black','#0B0B0B',1],['Charcoal','#2E3033',0],['Cool grey','#6E7376',0],
+      ['Pewter','#9AA0A3',0],['Icy grey','#D3D7DA',0],['Optic white','#F4F5F6',1]]},
+    { name:'Blues', shades:[
+      ['Navy','#1B2A45',1],['Royal blue','#1E3A8A',0],['Petrol','#17414B',0],['Ice blue','#C4D6E6',0]]},
+    { name:'Reds & pinks', shades:[
+      ['True red','#C1121F',1],['Cherry','#9B1B30',0],['Fuchsia','#A4266B',0],['Icy pink','#E6C5D3',0]]},
+    { name:'Greens', shades:[
+      ['Pine','#12372A',1],['Emerald','#0F5132',0],['Ice green','#CDE2D9',0]]},
+    { name:'Purples', shades:[
+      ['Deep violet','#3B2A55',0],['Amethyst','#6D4C8C',0]]},
+    // Deep Autumn is a warm season and this list had no warm neutral in
+    // it, so the tan bag matched "Cherry" and the gold watch matched
+    // "Icy pink". Nothing on the page was wrong to say the nearest
+    // shade; the nearest shade was wrong because the palette was short.
+    { name:'Warm neutrals', shades:[
+      ['Camel','#B08D57',1],['Toffee','#8A5A2B',0],['Bronze','#6F5A34',0],
+      ['Taupe','#8C8071',0],['Cream','#E8DCC4',0]]}
+  ];
+
+  // ── The rail ───────────────────────────────────────────────────
+  // Per-garment fields are what everything else is derived from:
+  //   tone light|mid|dark   temp warm|cool|accent   volume  texture
+  //   warm 0..3 (how much it keeps out)   rain (survives weather)
+  //   spot: where it physically lives in the house
+  var P = function(o){ return o; };
+  var PIECES = [
+    P({id:"white-tee",n:"White T-shirt",s:"white tee",c:"tops",sh:"tee",p:28,note:"Two of these",spot:"Top drawer",hex:"#E1E1E1",occ:["work", "weekend", "travel"],warm:1,rain:false,tone:"light",temp:"cool",vol:"fitted",tex:"cotton",photo:"data:image/jpeg;base64,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"}),
+    P({id:"black-tee",n:"Black T-shirt",s:"black tee",c:"tops",sh:"tee",p:28,note:"Goes with everything",spot:"Top drawer",hex:"#171716",occ:["work", "weekend", "dinner", "travel"],warm:1,rain:false,tone:"dark",temp:"cool",vol:"fitted",tex:"cotton",photo:"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQEAwUEBAQGBQUGCA0ICAcHCBALDAkNExAUExIQEhIUFx0ZFBYcFhISGiMaHB4fISEhFBkkJyQgJh0gISD/2wBDAQUGBggHCA8ICA8gFRIVICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD/wAARCACTAIcDASIAAhEBAxEB/8QAHQAAAgIDAQEBAAAAAAAAAAAAAAECCAMGCQcEBf/EAEUQAAECBAQDAwYIDQUBAAAAAAEAAgMEBhEFITFBBxJRCBNhIjJCcYGxUmJygpGhs8EUFRgjMzQ2dIOio7LRFyVDY2WS/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAH/xAAVEQEBAAAAAAAAAAAAAAAAAAAAAf/aAAwDAQACEQMRAD8AuUgoATKBJpZqJcG6lBLeyRIGZK83r3jVQPD3nl8ZxkR8TAuMNkQI0wfW0GzPW8tVX627VdbY+IklSktCpeRddvegiPNvHyiOVnzWkj4SC8/O0u5QcwL2UrrlphfEGtqcq5tUYVVOIQcUjXZHmYscxzH3AiB5IePA6bWVgad7YONSsuIdT0fKYlEAt+EYfMmXJ8Sx4cPocPUguV7UHTNVi/LCpkwQ51FY2IlvNEWAW39fP9y1nHe2HikaAWU3REvKRc7R8RmzGA+ZDDf7kFwHRGNLAXAF5s0E2JNr+4FSDg7Qrl3VfEWsq3qFmOVHj8xMzMr+rdy4wYcqSf8Aiay3Kch5XnHclekUR2oOIFLGFKY49lVYczLlnXlky0fFjAHm+eHHxCC/qF5JQPH7h7Xz4MnK4p+KsWiZDD8StCiOPRjr8kTP4JJ8F60HbboHa6EeKEAeiEboQGuiEIPXRBFzrDLVU34/8fMWjY7OUVQuKvkZCUJgz+ISzuWJMRQfKhw3jNrG6FwsSbgGwz9S7RnFh1BUeMCwaZ7qpcZY5sF7HeVKQNHxvA+izxufRKoTezmtGQAy8EBa7nOOZcS5xJuSepO58UaIJs8j2oQRigRIZYTa/wBXisLCWnleLOH1rOVAi+QzHRBu0lxAl5OmYWBGgKQmDDlTLfh8eQeZpxII7wvDwOcXve2oC0skBgb55AtcqFrZcpTzt0UBc3AG2adr6peCYVEmtFrOAI6HNWF4I8f8YpbHpKnKwxaLPUvHIgCNNO534eTk1weczDvYOaSeUZi1iDXsWvc7LHBiX5i4Ai1s0HXCG/nYHCxacwQbghSvsqxdl7i3+P8ABP8AT3HZovxXCoXNh8WI7OYlRl3dzq6HkPk2+CVZtriQgkhCEC3X4FYVVhNGUliNS45E7uSkYRiEN86I7RrGjdznWAHUr957gBbqqF9oriy2uqpbT2CTfeU1g0V3I9h8mcmBcOi+LW3LW/OO4QeS1rVmL1xWM/U2NxOacnX83dtN2QIYyZCZ8Voy8TcnMla691ntOik4gvzWGObC/RBlJ/OA9QpXN8wsROUM/FCnfJBL2KJT9qWp1QK2SEFOyBFAR7EZoHEPLAe7oCvngZwQeqyx/wBWi2+CVCUzlWG2dkH6WA4rilPVBJ45g006VxCRitjwIo9Fw6jcEXBG4JG66XcMq/w3iJQclUslaFGf+ZnJW9zLR2252Hw3B3BB3XMcGz16rwS4qR+GVdNmJqI91P4jywMShDPkFzyxwOrLm/VpcNbIOjRIQvkl48KagQ5iBHZGhRWh7IjHXa9pFwQRqCChB9LmBwzAPrVQ+NfZpe0zNUcM5MubnEmcCh6+Lpf393/87NVvSomGHZFByOIdDjOhxGua5pLXNcLFpGoIOYIKxTJtDPqV+OOHZ7w+vYUepaXhwZGrGNu9hsyFiQHoxNmxNg/2OysRQ/GMOncMnpnDsRlYsnNyrzCjwI7eV8J41a4HQoIOFgwdGgfUpDVEXKIlfJBJIp7KJQOyd8skt08zogWdkDNJSQKI28J4G7SvnkyTKMX1uNmeG6x4fLxiWSncRDHc8Q2wgwl7nHRobqSbiw3UES+zrnIK1PBfs3RcXZL1JxDlXwZI2iS+Dvu10XcOj7tH/WMz6VvNW18DezpDwEy1X1zLMfjGUSVkHgObI/Gds6L9TNrnMWchw2wmBrQABsqFLy0CUloUvLQWQYMFghw4cNoa1jQLAADIADKwQspKEDRohGvggRa0ixWpY1QVHYhUcOsp+npOYx2Sl3w4M5EZdzRbIkaEjYkEjO1lty+PEjbCpw9ILz/KUHJV36OGdyApbaqJ/Qwvkj3JnzUGRvmqJ1Q3RB1QMXKaiD4p+KCJNipXFlE+donsgcX9WifIPuXR7h1RtLYlTlI1jO4DJR8fl8Kl4ULEHwgYrW903fcgZAnMAkAi65xPzgRAd2n3Lp1woN+EtLnrhksf6TVIN2DWtGSaEtVQITQgSeyEIAa6L4MYdy4FiDukvEP8hX3r8uoHclMYq+9uWUjH+QoOTmXdQfkN9yk7RQbnCg/Ib7lJ+QQTbZJ2SGnJJ+qBgpj1JBMHogi7VTGixu18VNuiCTs4TvUV034SG/B+k3dcLlvsmrmR6Dh4FdNODx5uDNIHrhUt9k1SDfboCMkKgKEIQJPO+SEXQG6/Cq5/d0NUET4OHTDv6Tl+6Dmtcrh4Zw6qZ5Ng3C5ok/wXIOVcOxhQh8RvuQ852RCH5mHf4DfcouN3IMjTkhyG7IcgAVIaKA0U9kGNxzUmm26i7VSCCd10w4Ku5+CFHu/8uX+zC5nA5hdK+Bb+fgNR7jth0EfQ0KD0hKyaFQIQhAISvmnbO6AWpcSIvccJqyjHPkwacNv4D1tu60fizE7vgtW7umCzn2Lgg5hMBbBaCdGgfUsWrrrM4WaAsZAA0QTam5JpTJvogxjU5LINFjAzU9AgideikNFA3v1U26KCTLXHrXSPgC/vOANInpIsH0XH3Lm83z2nxXRjs6v5+z9SpvpK2+h7h9yo9YT1S2R7UDQhCARcIQED3XnnGZ7YfAuuXF1v9nmR9LCF6Hda9WFMStY0Xi9MTkxFl5fFJd0u+LBtzsB3F8roOVj9SfFYnXcdFc9/Y0wNzyW13ioB6ysEpDsY4EDd1d4mfVKwkFNWsNk3NNtFdJnY6pdrbPrPGnO6tgwQP7Vid2NsCc42rvFANgZWCUFLRqp6hXId2MMFv5NeYkPXKQlJvYxwMDyq7xMn91hWQUz5CTopNaRqrlfkZ4Rzft/iAH7lC/ym/saYOWWZXuIh3jJwiFBTUutZdEezTGEXs902R6MOI36I0QfcvLD2MZTm/b2ccP3KH/lWA4ZUK3h3QsnSsPEHz8KU5g2M9oa53M9zzcDLV1vYqN2tlqkQntZGqBAoTQgEDVCEAkEIQPZLqhCACEIQSQUIQR2ugbIQgeyBqhCA1CAhCAKEIQf/2Q=="}),
+    P({id:"breton",n:"Breton top",s:"breton",c:"tops",sh:"tee",p:42,note:"Shrunk once",spot:"Top drawer",hex:"#81807F",occ:["weekend", "travel"],warm:1,rain:false,tone:"mid",temp:"cool",vol:"fitted",tex:"cotton",photo:"data:image/jpeg;base64,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"}),
+    P({id:"white-shirt",n:"White button-down",s:"white shirt",c:"tops",sh:"shirt",p:68,note:"Ironed under protest",spot:"Rail, left end",hex:"#E5E5E5",occ:["work", "dinner", "travel"],warm:1,rain:false,tone:"light",temp:"cool",vol:"straight",tex:"cotton poplin"}),
+    P({id:"black-shirt",n:"Black button-down",s:"black shirt",c:"tops",sh:"shirt",p:68,note:"Evening, mostly",spot:"Rail, left end",hex:"#161615",occ:["work", "dinner"],warm:1,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"cotton poplin"}),
+    P({id:"chambray",n:"Chambray shirt",s:"chambray",c:"tops",sh:"shirt",p:58,note:"Worn open over the tees",spot:"Rail, left end",hex:"#85A5BB",occ:["weekend", "travel"],warm:1,rain:false,tone:"mid",temp:"cool",vol:"oversized",tex:"chambray"}),
+    P({id:"beige-knit",n:"Beige knit sweater",s:"beige knit",c:"knit",sh:"knit",p:88,note:"Pills at the cuff",spot:"Second shelf",hex:"#DBCBB8",occ:["work", "weekend", "travel"],warm:2,rain:false,tone:"light",temp:"warm",vol:"straight",tex:"lambswool",photo:"data:image/jpeg;base64,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"}),
+    P({id:"black-knit",n:"Black sweater",s:"black sweater",c:"knit",sh:"knit",p:92,note:"Every winter, twice a week",spot:"Second shelf",hex:"#121212",occ:["work", "dinner", "travel"],warm:3,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"merino"}),
+    P({id:"cream-cardi",n:"Cream cardigan",s:"cream cardigan",c:"knit",sh:"cardi",p:110,note:"Wears like a blanket",spot:"Second shelf, folded",hex:"#E6DBCC",occ:["weekend", "travel"],warm:3,rain:false,tone:"light",temp:"warm",vol:"oversized",tex:"wool"}),
+    P({id:"black-blazer",n:"Black blazer",s:"black blazer",c:"outer",sh:"jacket",p:165,note:"Does the heavy lifting",spot:"Rail, right end",hex:"#141418",occ:["work", "dinner"],warm:2,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"wool",photo:"data:image/jpeg;base64,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"}),
+    P({id:"blue-jeans",n:"Blue jeans",s:"blue jeans",c:"bottoms",sh:"jean",p:96,note:"Hemmed twice",spot:"Second drawer",hex:"#243C53",occ:["weekend", "travel"],warm:2,rain:true,tone:"mid",temp:"cool",vol:"straight",tex:"denim",photo:"data:image/jpeg;base64,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"}),
+    P({id:"black-jeans",n:"Black jeans",s:"black jeans",c:"bottoms",sh:"jean",p:92,note:"Does everything",spot:"Second drawer",hex:"#131311",occ:["work", "weekend", "dinner", "travel"],warm:2,rain:true,tone:"dark",temp:"cool",vol:"straight",tex:"denim",photo:"data:image/jpeg;base64,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"}),
+    P({id:"cream-jeans",n:"Cream jeans",s:"cream jeans",c:"bottoms",sh:"jean",p:88,note:"Summer only, obviously",spot:"Second drawer",hex:"#EAE4D8",occ:["weekend"],warm:1,rain:false,tone:"light",temp:"warm",vol:"straight",tex:"denim",photo:"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQEAwUEBAQGBQUGCA0ICAcHCBALDAkNExAUExIQEhIUFx0ZFBYcFhISGiMaHB4fISEhFBkkJyQgJh0gISD/2wBDAQUGBggHCA8ICA8gFRIVICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD/wAARCAC5AFIDASIAAhEBAxEB/8QAGwAAAQUBAQAAAAAAAAAAAAAABQABAgMEBgj/xAA/EAABAwICBQcJBwMFAAAAAAABAAIRAwQFIRIxQVGxIjRhcXKhwRMUFTI1UmKB0SMkM0JzkbIWJWNDU4KDov/EABgBAQADAQAAAAAAAAAAAAAAAAMAAQIE/8QAHxEBAAMAAgMBAQEAAAAAAAAAAAECMRESAyEyQRMi/9oADAMBAAIRAxEAPwD2VCz3N023LWlpcXA6uhaEKxIuNwzaAzPOIzWbTxC49yu9JNifIPPUQmOKUweb1p6h9UN0sp0J6iCq69w1lpXe0FpbSec8vymO9F3knWBI41biOQ+D1JNxq3eDoseYMbEPY5oo06Ye0hjQ39ghFWli39RUKtK9tKWFCn9rTe2Xl8mSI35Zzs1KpvaEisOoOLUzqpPJ+ScYo3bQqDrhBq9xa0GNq1bhjKbajGlz4aOUdECTtJcB81eS1zQ5lNzx7xyHep3lOsCFTGaVJheaDzAmAQiYIcARtXJ3Ae6g+GsiDlOS6WyJdZW7nGSabSY6lulpnWbRENGaSUpJWCQW+ZSfiYquY01KTS1jtrQYmP2RpAKrGedV3NaBpVC49JyE9yO+NV1TW0cwRyiNmXeh78Mtbq4beVaelctoG28s0kE0y8PLY1RpNGcSiTmN26lIAFphDxyXnhGSXSdc96oqNAcxjRGlULiVc6WuaRtOagfxWTvKpFVxY211T8nd29OvSa5lQsqNDmlzHBzTB3OAI6QFGm+m0BlUnk+rMwQtTs9IbyExps2hThXJVDNAkCBlsRjDHThtMe7Lf2JQSoAAAJnrRDAAylh76LNKG1CeU4k556z0kpKT/pm0eheSkkkugZ5yXPA6bnneSUfcYa47gudZq6YRXaqcyDm1SaR1JjG8pg6XCAiIjcGA09KqD9KsGgSROStuM2AdKra5rG6ZbLjsbt61UrhZl5d4OyE5c2Fnpkmo5ztZUwSTk1Uo+uTo6gtuBHKuOy7j9FkdkwytOCH7aoN9Np7yt0+lTg5KSSSbkSNX8F5+E8Fzzcj1roK/N6nZPBc6DmFi+t1TOW1O07wFB+opMmETaVQZTuQHAcS8+sbpweHOtr+4tnxs0X5dxCOVn6NMu3AlQqUGUbG1Y1rWzbtc6BEnaT0qcc+059HLo2pNl23JU6WkxaKYhqqFoVsqRzWrBedEf4vFY7h0shbMHyvSP8R4har9KnB5JJJdIVVxzar2DwXP7kfuuaVj8B4IBuyQ3brhPGUpUzyU7vVUGZI2/wARuifN3x7pW7EqXk2243U9H9oWOq3Ta1nvOa3vCKYu2adJ25xHctxkszoIyCYWoalmpCai06gjhpmrrdhHPh00zxCH1zmiGFmL+mN7HeCuupOD6SSS6gqLsxZVp90oBOSPXvMa3ZQCTCG+t1xI+qq2GTCnraqWkB6Jv8aaY0rugzfUHdmimKNm0B3OBQ6zGliNuNxJ7iimIj7hUJ2Qe9LX5YnQCk2CT0q86lBmQTvPJRtslYy8LfhntGln+VyHPM1QiOHe0aHU7gpXUl0We9JNISXUFmv+YVerxQGckdxEn0fU+XEIADlCDyaSuJTkqZ+0VhIhUF3LHWjbEsOE4kzoY48EWvm6VhW7KGYUJv3HdT8Qit0PuVfsO4Jq/I51zrNvWmqOyUGv5MKLnDNC2r1v6UQw8xiVv/y/iUPbm9ELD2nb75d/Eq66ucdGkl8kl08gY8S9nv6xxC5+UfxT2c/rHFc9qCHyaSuGeSAqtGXjNXHMhNlpImxTBxNzWO5g4lFq4m3qN3tI7kLwWDVuY2aI4ouWy0rpr8inXINzaq3aROWSk3IEBWNaIzXMVWwEZkLbhzv7lbnpP8SstQgZLTh4jELYn3jwKuupOOmSTpLrAw4qfuBHxDiufPqiEdxifMBHvhc+dUIPJpK4eUh64hROxIHl6kTY3gmu4PxAdyLoRgn4Nc/H4BFl00wM65Ath7gdilMBKoft6naPFMTkucqonSfmtlnz627fgVhGbzlmttpAv7bV+J4FSurnHUfNJN8kl1cgYMYMWLd+mPFc8RkEfxoxZM/UHAoDGSC+kriJTt1piE7NZRtjuBj7nVO+oeARTNC8C9nvJ21XeCKHYuquBnXJVRF1VHxniVBxyVlcRe1x8buKqK5p00K2esVrtSfPrbL/AFAsrfWyWm259bfqtUjUnHVJJJLpEG42Ysqf6g4FAh6vyRvHMrWl2/AoIDlmEF9briJ6k7Tkd6c5JgCGlxWGx/AxGGA73uPeiR2IdgvsmkY1uef/AEURJXVXATrk7nLELjtniqTIV14YxG4HxlVHpzXNOyaMRYDMwtFtz+3J/wB1qqbqU7cxfW07areKkakusSSSXSJjxGzqXdKm2mWyx0w+YOUbELdhd8CQKVN3U/6hdEdRUVm1IlItMOcGGXm21J/7GpOw2+dyRagD4nhdHsSVfzhfaWTDbarbYdSo1YD2zIBkZknxWzRThOkhiZc7dYbeOvqtRlFlRj3TOnBUPRl44Z22XQ8LpPqmP5VifHDXaXOejLyIFu0ddRWUsJvBcUajvI0203teYJJyKPnYo/U8FUUhO0n+SSmkk4Zf/9k="}),
+    P({id:"black-trouser",n:"Black trousers",s:"black trousers",c:"bottoms",sh:"trouser",p:120,note:"The interview pair",spot:"Rail, right end",hex:"#1A1A19",occ:["work", "dinner"],warm:3,rain:false,tone:"dark",temp:"cool",vol:"wide",tex:"wool",photo:"data:image/jpeg;base64,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"}),
+    P({id:"beige-trouser",n:"Beige trousers",s:"beige trousers",c:"bottoms",sh:"trouser",p:98,note:"Crease-prone",spot:"Rail, right end",hex:"#CEB69C",occ:["work", "travel"],warm:2,rain:false,tone:"light",temp:"warm",vol:"wide",tex:"cotton twill",photo:"data:image/jpeg;base64,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"}),
+    P({id:"black-skirt",n:"Black midi skirt",s:"black skirt",c:"bottoms",sh:"skirt",p:74,note:"Pockets, finally",spot:"Second drawer",hex:"#131312",occ:["work", "weekend", "dinner"],warm:1,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"jersey",photo:"data:image/jpeg;base64,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"}),
+    P({id:"ivory-skirt",n:"Ivory slip skirt",s:"ivory skirt",c:"bottoms",sh:"skirt",p:82,note:"Only ever worn twice",spot:"Hanging bag, back of the door",hex:"#E1D6C5",occ:["dinner"],warm:0,rain:false,tone:"light",temp:"warm",vol:"straight",tex:"satin"}),
+    P({id:"lbd",n:"Little black dress",s:"black dress",c:"dress",sh:"dress",p:145,note:"Ten years, still fits",spot:"Rail, right of the coats",hex:"#151514",occ:["work", "dinner"],warm:1,rain:false,tone:"dark",temp:"cool",vol:"fitted",tex:"crepe"}),
+    P({id:"trench",n:"Camel trench coat",s:"the trench",c:"outer",sh:"trench",p:240,note:"Ten years old",spot:"Hook in the hall",hex:"#C1A886",occ:["work", "weekend", "dinner", "travel"],warm:2,rain:true,tone:"light",temp:"warm",vol:"straight",tex:"gabardine",photo:"data:image/jpeg;base64,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"}),
+    P({id:"denim-jacket",n:"Denim jacket",s:"denim jacket",c:"outer",sh:"jacket",p:110,note:"Spring and September",spot:"Hook in the hall",hex:"#49667C",occ:["weekend", "travel"],warm:2,rain:true,tone:"mid",temp:"cool",vol:"straight",tex:"denim",photo:"data:image/jpeg;base64,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"}),
+    P({id:"leather-jacket",n:"Black leather jacket",s:"leather jacket",c:"outer",sh:"jacket",p:295,note:"Getting better with age",spot:"Hook in the hall",hex:"#1F1F1D",occ:["weekend", "dinner", "travel"],warm:3,rain:true,tone:"dark",temp:"cool",vol:"fitted",tex:"leather",photo:"data:image/jpeg;base64,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"}),
+    P({id:"scarf",n:"Cashmere scarf",s:"the scarf",c:"accessory",sh:"scarf",p:85,note:"Lives in a coat pocket",spot:"Hook in the hall",hex:"#B7A490",occ:["work", "weekend", "dinner", "travel"],warm:2,rain:false,tone:"light",temp:"warm",vol:"straight",tex:"cashmere",photo:"data:image/jpeg;base64,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"}),
+    P({id:"tote",n:"Black tote bag",s:"black tote",c:"accessory",sh:"tote",p:85,note:"Carries a laptop",spot:"Hook by the door",hex:"#2A2A29",occ:["work", "travel"],warm:0,rain:true,tone:"dark",temp:"cool",vol:"straight",tex:"leather",photo:"data:image/jpeg;base64,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"}),
+    P({id:"crossbody",n:"Tan crossbody bag",s:"tan crossbody",c:"accessory",sh:"crossbody",p:120,note:"Hands free",spot:"Hook by the door",hex:"#894E27",occ:["weekend", "dinner", "travel"],warm:0,rain:false,tone:"mid",temp:"warm",vol:"straight",tex:"leather"}),
+    P({id:"sneakers",n:"White sneakers",s:"white sneakers",c:"shoes",sh:"trainer",p:95,note:"Rewhitened monthly",spot:"Rack by the front door",hex:"#E0DFDC",occ:["weekend", "travel"],warm:1,rain:false,tone:"light",temp:"cool",vol:"straight",tex:"canvas"}),
+    P({id:"loafers",n:"Black loafers",s:"black loafers",c:"shoes",sh:"loafer",p:135,note:"Barefoot, June on",spot:"Shoe box, under the bed",hex:"#2A2926",occ:["work", "weekend", "dinner"],warm:1,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"leather"}),
+    P({id:"flats",n:"Ballet flats",s:"ballet flats",c:"shoes",sh:"maryjane",p:98,note:"Folded in the tote",spot:"Shoe box, under the bed",hex:"#A88465",occ:["work", "dinner", "travel"],warm:1,rain:false,tone:"mid",temp:"warm",vol:"straight",tex:"leather",photo:"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQEAwUEBAQGBQUGCA0ICAcHCBALDAkNExAUExIQEhIUFx0ZFBYcFhISGiMaHB4fISEhFBkkJyQgJh0gISD/2wBDAQUGBggHCA8ICA8gFRIVICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD/wAARCABXAIMDASIAAhEBAxEB/8QAHQAAAQUBAQEBAAAAAAAAAAAAAAMFBgcIAQQCCf/EAD8QAAEDAwIDBAcECQMFAAAAAAECAwQABREGIRIxQQdRYXETIjI0coHBFCNikQgVFiRCQ1KCoRdEsTNTY7Px/8QAGQEBAAMBAQAAAAAAAAAAAAAAAAIDBAEF/8QAJBEAAgIBBAEEAwAAAAAAAAAAAAECAxEEEiExMhMUQWEiUVL/2gAMAwEAAhEDEQA/ANlGjYVV2qO2S06W1jJsE21SXhGKA4+ytJI4kJXsk46KHWphpzV9h1XEMmy3FuQE/wDUaPquN/Ek7jz5GqlbBvbnksdU0tzXA/kgDJ5Cvhp9p5HG04laD/ElQI/xUX1vcBDtDMYEEynMKSTgKQncjyOw+dZXn3bUfZ7qbhtt1lMR3SpyI8lR4XkA7pUD6pUkkBQI7jyUKpt1CrljBdVp3Ys5Nq+NFUbozt5hz0txNUMCM7y+2RwSg+Kkcx5jI8BV0Qp8S4RW5cKQ3IjuDKHWlBSVeRFW12ws8WVWVTrf5I9R8qMigeNFXFRyiu0UAb0daNqPKgAij/Fc3rvKgCkle8t/Cr6Ur0pJXvLfwq+lAK0VyigMzdvWnVzLzOv9ub/eoKEfam0Dd1gISfSAdVIyc96D+GqSsl8m2y4tTIcp2M+2coeZWUqT8x08ORrVmrgoaymLQeEgtkHu+7TWfNdaJGn5arxa2MWWS4AptPKE6f4PgV/Aeh9Q8hnwrlibaPboktqTJ612lL1GxFbv8lDcphstpkgcLbgO+VgewfEDHw183eBCvVvdtd0YU4w5hxJQQFtq5JdbVuM467hQ2O3Kmo760L64qWWG+yYKQyCJETOTHdzhJ6lJG6D4jn1Bqne35F3ppeIx3LT9z05PQxLV6Vh0kxpjQIQ+Bz2PsrHVB3HiMGnzTOtNQaXmentc9xgKOVt+0278SDsfPY+NTlqXbbvAeiJbE2O4niegPbODHJQxzx0WjcdQKic3S32cKkQXjLg8+Mj7xkdzgH5cQ2PgdqjzF7oksqS2yL50f2z2S9JbjXwJtMw7ekKssLPxH2PJX5mrSbdQ4hK0LCgoZCgcgjwrFgsb6PXRlJ7xUm03rnUujXEtx3y9DHtRHsqaI8OqD5beFb6ta1xYYrdEnzWax+VFQTSXahpzVJRFD36vuKv9rIUAVn8CuSv+fCpyFZ2r04TjNZizzJQlB4kj6+dc3ruMc6Nu+pkDnKunNFHlQB40kv3pr4VfSlcUir3pv4VfSgFfzortFAVTqvH7Wzs/g/8AWmmJ5DL7D0d9lt9h5BbcadGUuIPNKh1B/wAbHmAaeNY8SNWTVbgK4CD3+ommFL4J4TXjWeTPVr8UVDf9CzbPOW/bkrmWtxX3ZJy6yTybX/Ue5Q9oeIIrwRrctSSpIII2O2MGrzShK8ghKgoFKkqGQodQR1H/ANpqmafjvlTrA4XEjO+6kjx/rT48xWWUPk1wn8MqRbMuOtLg4soPEFJJBSe8Y3B8RUltWpSp1P6yUtD45TGUjj/vTsFjvIwrv4qfHLS2oqQtvhWnZST0ptk6ebIKkJwary10WvD7JGhMF+Kh5JZbQs8KXWlfcOHuB/lq/CoD5V4rjZUOhSFNlCxzSRg1DVOXayylPQX1NlQwoYBS4nuUk5Ch4Gn606ujuITGmNtwe5Kwpccn8J9tr5ZT5V3hkeYjBP08/HWpxrOOfD0qUaa7Y9RaV4Id1Crvb0bcDyz6Vsfhc3z5Kz5inuQI7rLZUhaEujiQpJS+2sfhWk7/APIpimaJYuyVKLrraOq0RycD5qAqUHODzFkZbJxxMvjSnaXpLWCAi1XNCZmMqhyMNvJ/tPteacipe2tDraXW1pWhQyFJOQRWW7XobR9ukMS4NuevDzS0uIkyXlv8S87eiQgIaJHU5UBy3O1TpXa5pzREo26+agZW+CS5AbSp99onfdLST6M94P5V69V7lxJHk20xXMWXdRnwqL6S15pbW8V5/Tl2RLUxgPMqQpp1rPLiQsBQBwcHGDjapRjIrYZApNWPtTfwq+lKdKSX7038KvpXQK0V870UBkXta1pddO9uV8hwLkpvj+zr+xTElTD37u3uhKseRKCDkb0ppztI0/ep6LXcXE2S6KwEtvufcunuQs4wfBQHma03qTSGm9XW9UDUdliXOOr+GQ2FcPiDzSfEEGqauX6LuhQ69LtjEhx5fspmSVvBA6JSCeQ8c1js0+55RrheksM9/CphRQ4kpUOYIr74gog8RBHIg4IqI/qrVWgEJgzIz92sbeyWieJ+MO9pR5j/AMajj+kinuLNjy4rU2FITIivDibdRnCu8YO4IOxB3BrFODj2aozUuhwejJlYLgPGOTjYGfmnr8vyryOW9zhIBaX/AH8B/JWK9jT+RivSmQeHHFmqdkWWqckRWVYXJHCVhpttS0oUtSwQnJxnCck86Ui6Hs8WdIQ7BmXmUwvgUlw/ZYoOM7qTla/IdeeKlDqW5cdUd7iU0sYUAopyO7IOaievNcHRdlj2yyJYTeJjavsqVpBbitA4U8U9dzhKTsVZJ2BzOupN4RGdrUeT33q8WGwWxCdYT4Nka/2sZlHASO9ppILh8yMGmSwa803dZi4NuuypKk7o9NGXHUsb8gvY/I/KsxXpN+lXKTdLhIfnS31FTsl5fGtw+J+nIdABTZAvk23SkOocUlSVZHQg948a3+2WPsxe4efo1B2odoi7FbYWn7Nc0wbvdULWqUlXrxo6diUdylq9UHoAojfFZtmWS4RQp+Pl1vJUSk5Pn4+dNeu7pcr5fmtQvrDjDrLcdKkcm1ITukjoScq8cnHI14Lbq27WshLTvpW+qF7ir6obI/ZRZPcyy+z3tUvGhdRM3CM4FpA9G8y77LiCclJ7uXTka3no3Wdm1tppi+WV7jac9Vxsn12VjmhXcR/kb1+bqr1p++MfvkFdvl/95rdB86uL9GDUdytfa9+y7T5k2y6sOJc4clKVtoK0L/IKHzq0rNyA5pNXvbXwq+lKgYGKSV7038KvpXQLUVzeigO0Z2oNHKgPLNgxp0dTMplLqDtgiqd1N2ZX6zzn73oIsSA8eOXZpSuBqUQPaSr+W5+IbHkQcVdeK70qMoqSwyUZOLyjL/7bWOFK/V+oky9J3LODFvLZaST+B4fdqHjkeVP7D5ksCRCcRLYP82OsOo/NJIq8rnZ7ZeYS4d1t8afHXzbkNhxP5EVVd0/R07OpUlU2zRp2m5it/TWiUtjB8gcVjlpf5ZqjqP2hnTMVxhAHrE4A8ax/2j6vmX3tPvdwbeWGWnzDjgHYNNEoT+ZCleajWupXY52k2shzT/aYuehBBQzeI6XT5cRBP+aoy+/o39p7U2TKRAiS/TOrdIilJSColRwCcgZPKu01uttyOWzU1iJU8HWU2KkIeQl9HcqnNzUGjrsxwXCG5BkYx6VsZGaeH+yDXURRTMsDrRTzzHV/yK8X+lmonV4VES1nqWVVq3IzbWRd0RES3YEeUmZDfR66k8kjmCe4g71Ycr9G3tGipSs2syGlAKC2CFpIIzkfKpx2ZdhkQ3+JN1FFkXRlpYWYnB6JhZByAvqoZ6ZAPXNbWbQOAEjh2G3QV3voddo/Pm19g+py+lE2DLYyd8MA/StPdjPZNZtGOquyrO8q68CkJnS18S0BXMISAEoz1OM+OKuzgTzo5USwcbDoKSV703n+lX0pbOaRV7038KvpUjgtRXKKA6TviiiigDlRnwoooAooooArmByxiiigOcIPfSZYYJ9dlCj3lIoooD7Q00n2G0p8hivuiigDajHcaKKA4OVJq95b+FX0oooBWiiigP/Z"}),
+    P({id:"boots",n:"Black ankle boots",s:"ankle boots",c:"shoes",sh:"boot",p:155,note:"Twice resoled",spot:"Rack by the front door",hex:"#262625",occ:["work", "weekend", "travel"],warm:3,rain:true,tone:"dark",temp:"cool",vol:"straight",tex:"leather"}),
+    P({id:"sunglasses",n:"Tortoiseshell sunglasses",s:"the sunglasses",c:"accessory",sh:"glasses",p:75,note:"Scratched, still worn",spot:"Hook by the door",hex:"#54473E",occ:["weekend", "travel"],warm:0,rain:false,tone:"mid",temp:"warm",vol:"straight",tex:"acetate"}),
+    P({id:"watch",n:"Gold watch",s:"the watch",c:"accessory",sh:"watch",p:180,note:"Was a present",spot:"Bedside dish",hex:"#D8C7B0",occ:["work", "dinner"],warm:0,rain:false,tone:"light",temp:"warm",vol:"straight",tex:"metal",photo:"data:image/jpeg;base64,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"}),
+
+    // ── Colour, added 2026-08-05 ──────────────────────────────────
+    //
+    // Founder: "doesnt feel like a real womans wardrobe", then "fix the
+    // missing items". Twelve of the first thirty pieces were black, so
+    // even after the rail stopped ranking by colour distance alone,
+    // work still read as five shades of dark — the wardrobe did not own
+    // anything else that suited it.
+    //
+    // These are the pieces a real one has and this did not. No `photo`
+    // field, so they draw as the same inline shapes everything else
+    // falls back to: there is no photograph of a garment that does not
+    // exist, and inventing one would be the page lying about itself.
+    //
+    // Two carry temp:"accent", which this page has looked for since it
+    // was written and never found — colourNote asks for an accent, and
+    // so does the rail's colour-story spread. The branch was dead
+    // because nothing in the wardrobe was ever a colour.
+    P({id:"navy-blazer",n:"Navy blazer",s:"navy blazer",c:"outer",sh:"jacket",p:180,note:"Sharper than the black one",spot:"Rail, right end",hex:"#1F2A44",occ:["work", "dinner"],warm:2,rain:false,tone:"mid",temp:"cool",vol:"straight",tex:"wool"}),
+    P({id:"camel-knit",n:"Camel roll-neck",s:"camel roll-neck",c:"knit",sh:"knit",p:88,note:"Wears with everything",spot:"Second shelf",hex:"#B08857",occ:["work", "weekend", "travel"],warm:3,rain:false,tone:"mid",temp:"warm",vol:"fitted",tex:"merino"}),
+    P({id:"rust-knit",n:"Rust merino sweater",s:"rust sweater",c:"knit",sh:"knit",p:84,note:"The one people comment on",spot:"Second shelf",hex:"#9C4A2A",occ:["work", "weekend", "travel"],warm:3,rain:false,tone:"mid",temp:"accent",vol:"fitted",tex:"merino"}),
+    P({id:"olive-trouser",n:"Olive trousers",s:"olive trousers",c:"bottoms",sh:"trouser",p:78,note:"Better than the beige",spot:"Rail, right end",hex:"#4E5340",occ:["work", "weekend", "travel"],warm:2,rain:false,tone:"mid",temp:"warm",vol:"wide",tex:"cotton twill"}),
+    P({id:"bottle-dress",n:"Bottle-green midi dress",s:"green midi dress",c:"dress",sh:"dress",p:145,note:"Does a whole evening alone",spot:"Rail, right of the coats",hex:"#1E3A32",occ:["work", "dinner"],warm:2,rain:false,tone:"dark",temp:"cool",vol:"straight",tex:"crepe"}),
+    P({id:"burgundy-cardi",n:"Burgundy cardigan",s:"burgundy cardigan",c:"knit",sh:"cardi",p:72,note:"Warmer than it looks",spot:"Second shelf, folded",hex:"#5C2230",occ:["work", "weekend"],warm:3,rain:false,tone:"dark",temp:"accent",vol:"oversized",tex:"lambswool"}),
+    P({id:"stripe-shirt",n:"Blue striped shirt",s:"striped shirt",c:"tops",sh:"shirt",p:65,note:"Sleeves always rolled",spot:"Rail, left end",hex:"#7A96B8",occ:["work", "weekend", "travel"],warm:1,rain:false,tone:"light",temp:"cool",vol:"oversized",tex:"cotton poplin"}),
+    P({id:"grey-marl",n:"Grey marl sweatshirt",s:"grey sweatshirt",c:"tops",sh:"tee",p:45,note:"Weekend uniform",spot:"Top drawer",hex:"#8A8A87",occ:["weekend", "travel"],warm:2,rain:false,tone:"mid",temp:"cool",vol:"oversized",tex:"jersey"}),
+    P({id:"tan-boots",n:"Tan ankle boots",s:"tan boots",c:"shoes",sh:"boot",p:135,note:"Resoled once",spot:"Rack by the front door",hex:"#8A5A34",occ:["work", "weekend", "travel"],warm:2,rain:true,tone:"mid",temp:"warm",vol:"straight",tex:"leather"}),
+    P({id:"cream-skirt",n:"Cream pleated skirt",s:"cream skirt",c:"bottoms",sh:"skirt",p:82,note:"Needs a warm top",spot:"Second drawer",hex:"#E8DFCE",occ:["work", "dinner"],warm:1,rain:false,tone:"light",temp:"warm",vol:"wide",tex:"crepe"})
+  ];
+
+  var CATS = [['all','All'],['tops','Tops'],['knit','Knitwear'],['bottoms','Bottoms'],
+              ['dress','Dresses'],['outer','Outerwear'],['shoes','Shoes'],['accessory','Accessories']];
+
+  // ── Colour maths ───────────────────────────────────────────────
+  // Distance in plain RGB. Not perceptually uniform — Lab would be
+  // better — but it is arithmetic on real values, and the page says
+  // "distance to the nearest shade" rather than dressing it up as
+  // something it is not.
+  function rgb(hex){
+    return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+  }
+  var SHADES = (function(){
+    var out = [];
+    FAMILIES.forEach(function(f){
+      f.shades.forEach(function(s){ out.push({ name:s[0], hex:s[1], core:!!s[2], family:f.name }); });
+    });
+    return out;
+  })();
+  function nearestShade(hex){
+    var a = rgb(hex), best = null, bestD = Infinity;
+    SHADES.forEach(function(s){
+      var b = rgb(s.hex);
+      var d = Math.sqrt(Math.pow(a[0]-b[0],2) + Math.pow(a[1]-b[1],2) + Math.pow(a[2]-b[2],2));
+      if (d < bestD) { bestD = d; best = s; }
+    });
+    // Report the DISTANCE, and a band drawn on it. An earlier version
+    // reported a 0-100 "match" — but the scale was invented (441 is the
+    // longest possible RGB distance, and the rest was a multiplier
+    // chosen to make the numbers spread nicely). On a page whose whole
+    // claim is that its statements are derived, a fabricated score was
+    // the one thing that wasn't. A band plus the real number says
+    // exactly as much and can be checked.
+    var d = Math.round(bestD);
+    // 25 / 45. The first thresholds (35 / 80) placed 23 of 30 pieces
+    // "in palette" and none outside, which reads as flattery rather
+    // than analysis — the whole value of the section is being told
+    // which of your clothes do NOT suit you.
+    return { shade: best, distance: d, band: d <= 25 ? 'in' : d <= 45 ? 'near' : 'out' };
+  }
+  PIECES.forEach(function(p){ p.match = nearestShade(p.hex); });
+
+  // ── Look composition ───────────────────────────────────────────
+  var MOODS = {
+    any:      { keep:function(){ return true; }, line:'' },
+    polished: { keep:function(l){ return l.some(function(p){ return ['silk','wool','merino','leather','gabardine'].indexOf(p.tex) > -1; }); },
+                line:'Polished: at least one piece with a bit of formality in the cloth.' },
+    easy:     { keep:function(l){ return l.some(function(p){ return ['denim','cotton','ribbed cotton','canvas','corduroy','lambswool'].indexOf(p.tex) > -1; }); },
+                line:'Easy: cloth you can sit down in without thinking about it.' },
+    bold:     { keep:function(l){ return l.some(function(p){ return p.temp === 'accent'; }); },
+                line:'Bold: one piece carrying actual colour, the rest getting out of its way.' },
+    quiet:    { keep:function(l){ return !l.some(function(p){ return p.temp === 'accent'; }); },
+                line:'Quiet: no accent at all, so the whole thing reads as one note.' }
+  };
+
+  function looksFor(occ, wx, mood){
+    var wet = wx === 'rain', cold = wx === 'cold';
+    // Rain constrains what touches the ground and what goes over the
+    // top. It does not constrain a top — that is what a coat is for.
+    // Testing every slot emptied the rail on every rain combination.
+    var exposed = { shoes:true, outer:true };
+    var dry = function(p){ return !wet || !exposed[p.c] || p.rain; };
+    var inCat = function(c, occOnly){
+      return PIECES.filter(function(p){
+        return p.c === c && dry(p) && (!occOnly || p.occ.indexOf(occ) > -1);
+      });
+    };
+    // Prefer pieces meant for the occasion; if that empties a slot,
+    // refill from the whole wardrobe rather than returning nothing —
+    // and the look card names the compromise.
+    var pick = function(c){ var s = inCat(c, true); return s.length ? s : inCat(c, false); };
+    var tops = pick('tops').concat(pick('knit'));
+    var bottoms = pick('bottoms'), shoes = pick('shoes'), dresses = pick('dress');
+    var outers = inCat('outer', false);
+
+    var bases = [];
+    tops.forEach(function(t){ bottoms.forEach(function(b){ bases.push([t,b]); }); });
+    dresses.forEach(function(dr){ bases.push([dr]); });
+
+    var out = [];
+    bases.forEach(function(base){
+      shoes.forEach(function(sh){
+        var look = base.concat([sh]);
+        if ((cold || wet) && outers.length) {
+          // Warmest coat when cold, driest when wet.
+          var coat = outers.slice().sort(function(a,b){
+            return wet ? (b.rain - a.rain) || (b.warm - a.warm) : b.warm - a.warm;
+          })[0];
+          look = look.concat([coat]);
+        }
+        var warmth = look.reduce(function(a,p){ return a + p.warm; }, 0);
+        if (cold && warmth < 7) return;
+        if (!MOODS[mood].keep(look)) return;
+        out.push(look);
+      });
+    });
+    var dist = function(l){
+      return l.reduce(function(x,p){ return x + p.match.distance; }, 0) / l.length;
+    };
+    out.sort(function(a,b){ return dist(a) - dist(b); });   // closest to the palette first
+
+    // Then spread it, or the rail is one answer five times.
+    //
+    // Founder: "nothing-to-wear site is a joke - doesnt feel like a
+    // real womans wardrobe." The rail showed five near-identical black
+    // looks, and this sort was why: black is nearest to almost every
+    // shade in the palette, so ranking purely by colour distance puts
+    // the five blackest combinations at the top, each differing from
+    // the last by one slot. The wardrobe underneath has a camel trench,
+    // a chambray shirt, a breton, cream jeans and an ivory slip skirt,
+    // and none of them could ever reach the front.
+    //
+    // So a piece already on the rail costs the next look that wants it.
+    // REPEAT is set so that reusing one garment hurts about as much as
+    // a visibly worse colour match: enough to reach for something else
+    // when something else exists, not so much that it forces an ugly
+    // pairing to avoid a repeat.
+    // Not repeating a GARMENT is not enough on its own: swap black
+    // loafers for black boots and the rail is still five black looks.
+    // So a look also pays for wearing a colour story already on the
+    // rail, which is what finally lets the camel trench, the beige
+    // trousers and the chambray shirt reach the front of a wardrobe
+    // that owns them.
+    // The DOMINANT tone, not the exact signature. Keyed on the full
+    // sorted list, "dark dark dark" and "dark dark mid" were different
+    // stories and both all-black looks sat in the top five untouched.
+    // What a person sees is "another dark one".
+    var story = function(l){
+      var n = {};
+      l.forEach(function(p){ n[p.tone] = (n[p.tone] || 0) + 1; });
+      var top = Object.keys(n).sort(function(a, b){ return n[b] - n[a] || a.localeCompare(b); })[0];
+      return top + (l.filter(function(p){ return p.temp === 'accent'; }).length ? '+a' : '');
+    };
+    var REPEAT = 14, SAME_STORY = 10;
+    var ranked = [], used = {}, told = {}, pool = out.slice();
+    while (pool.length && ranked.length < 24) {
+      var best = 0, bestScore = Infinity;
+      for (var i = 0; i < pool.length; i++) {
+        var seen = 0;
+        for (var j = 0; j < pool[i].length; j++) seen += used[pool[i][j].id] || 0;
+        var score = dist(pool[i]) + seen * REPEAT + (told[story(pool[i])] || 0) * SAME_STORY;
+        if (score < bestScore) { bestScore = score; best = i; }
+      }
+      var chosen = pool.splice(best, 1)[0];
+      chosen.forEach(function(p){ used[p.id] = (used[p.id] || 0) + 1; });
+      told[story(chosen)] = (told[story(chosen)] || 0) + 1;
+      ranked.push(chosen);
+    }
+    return ranked.concat(pool);
+  }
+
+  function byCat(look, c){
+    for (var i=0;i<look.length;i++) if (look[i].c === c) return look[i];
+    return null;
+  }
+  function cap(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  function colourNote(look){
+    var tones = look.map(function(p){ return p.tone; });
+    var has = function(t){ return tones.indexOf(t) > -1; };
+    var accent = look.filter(function(p){ return p.temp === 'accent'; })[0];
+    var warm = look.filter(function(p){ return p.temp === 'warm'; }).length;
+    var cool = look.filter(function(p){ return p.temp === 'cool'; }).length;
+    var parts = [];
+    // Founder: "avoid opinions". This told you tonal dressing "reads
+    // expensive", to "keep your skin the brightest thing in frame" and
+    // to "go clean" — a stylist's view of you, asserted by a page that
+    // has never seen you. It says what the look IS now. The wardrobe is
+    // yours; the commentary was mine.
+    if (has('light') && has('dark')) parts.push('light against dark');
+    else if (!has('light') && !has('dark')) parts.push('all mid-tone');
+    else if (has('dark')) parts.push('dark throughout');
+    else parts.push('light throughout');
+    if (accent) parts.push('the ' + accent.s + ' is the only real colour here, so let it be the loudest thing you own today');
+    if (warm && cool) parts.push('warm and cool neutrals in one look — gold metal sides with the warm ones');
+    var inside = look.filter(function(p){ return p.match.band === 'in'; }).length;
+    parts.push(inside + ' of ' + look.length + ' pieces sit inside your palette');
+    return parts.map(cap).join('. ') + '.';
+  }
+
+  function shapeNote(look){
+    var dress = byCat(look,'dress');
+    var line;
+    if (dress) {
+      line = dress.vol === 'fitted'
+        ? 'One piece, close to the body — the shoe decides whether it reads evening or daytime.'
+        : 'One piece, straight through. Add a belt if you want a waist.';
+    } else {
+      var top = look[0], bot = byCat(look,'bottoms');
+      if (top.vol === 'oversized' && bot.vol === 'wide') line = 'Volume on volume: front-tuck the top or it wears you.';
+      else if (top.vol === 'oversized') line = 'Loose on top, clean line below — leave it untucked.';
+      else if (top.vol === 'fitted' && bot.vol === 'wide') line = 'Fitted top, wide leg. The easiest proportion on the rail.';
+      else line = 'Straight through — belt it if you want a waist, skip it if you do not.';
+    }
+    return line + ' Texture does the rest: ' + look.map(function(p){ return p.tex; }).slice(0,3).join(', ') + '.';
+  }
+
+  function compromiseNote(look, occ, wx){
+    var off = look.filter(function(p){ return p.occ.indexOf(occ) === -1; });
+    if (!off.length) return '';
+    var names = off.map(function(p){ return p.s; }).join(' and ');
+    var because = wx === 'rain' ? 'the only thing here that survives the rain'
+                : wx === 'cold' ? 'what actually keeps the cold out'
+                : 'the only thing that completes the look';
+    return '<div class="note"><dt>Compromise</dt><dd>The ' + names +
+      (off.length > 1 ? ' are not a ' : ' is not a ') + occ + ' choice. Wearing ' +
+      (off.length > 1 ? 'them' : 'it') + ' anyway: ' + because +
+      '. A finite wardrobe means sometimes the day wins.</dd></div>';
+  }
+
+  var GROOMING = {
+    work:    { hair:'Low bun, clean centre part. Ninety seconds.',
+               face:'Groomed brow, tinted balm, one coat of mascara. Nothing else.' },
+    weekend: { hair:'Air-dried, hands only. One side tucked behind an ear.',
+               face:'SPF, brow gel, balm. Let the freckles do it.' },
+    dinner:  { hair:'Off the face and loosely waved — the neckline is the point.',
+               face:'Smudged liner, warm flush high on the cheek, gloss over the balm.' },
+    travel:  { hair:'Braided back so it survives the seat.',
+               face:'Balm on lids, cheeks and lips. One product, three jobs.' }
+  };
+  var RAIN_HAIR = 'Pin it up and forget it — it will be humid whatever you do.';
+
+  // ── Reading the sentence ───────────────────────────────────────
+  // Keyword matching, not a language model — a published page has no
+  // model to call. The page SHOWS what it understood, so a miss is
+  // visible and correctable with the chips rather than mysterious.
+  var CUES = {
+    occ: { dinner:['dinner','drinks','date','party','wedding','evening','birthday'],
+           work:['work','office','meeting','presentation','interview','client'],
+           weekend:['weekend','walk','casual','coffee','market','park','saturday','sunday'],
+           travel:['travel','trip','flight','train','pack','holiday','airport','lisbon','away'] },
+    wx:  { rain:['rain','raining','wet','shower','drizzle','storm'],
+           cold:['cold','freezing','winter','chilly','snow','frost'],
+           mild:['warm','hot','sun','sunny','summer','mild'] },
+    mood:{ polished:['polished','smart','sharp','elegant','pulled together','formal'],
+           easy:['comfortable','comfy','easy','relaxed','soft','cosy','cozy'],
+           bold:['bold','statement','colour','color','bright','fun'],
+           quiet:['quiet','understated','plain','simple','subtle','low key'] }
+  };
+  function readSentence(text){
+    var t = ' ' + text.toLowerCase() + ' ';
+    var found = {};
+    Object.keys(CUES).forEach(function(axis){
+      Object.keys(CUES[axis]).forEach(function(value){
+        CUES[axis][value].forEach(function(word){
+          if (found[axis]) return;
+          if (t.indexOf(word) > -1) found[axis] = value;
+        });
+      });
+    });
+    return found;
+  }
+
+  // ── Drawing a garment ──────────────────────────────────────────
+  //
+  // Founder, twice: "it's not showing real clothes", "our new site
+  // looks rubbish". Both were about this function. It used to be one
+  // flat path filled with one flat colour at 60x60 — a blob, and it
+  // read as one.
+  //
+  // A drawing cannot become a photograph, but the gap between a blob
+  // and a catalogue illustration is construction: a collar has a fall,
+  // a trouser has a crease, a knit has a rib at the cuff, denim has a
+  // twill running across it. So each garment is built from its actual
+  // parts, shaded from one light source, and filled with a weave that
+  // matches the cloth named in its own `tex` field.
+  //
+  // `photo` is the seam to real imagery: give a piece a data URI and
+  // it renders instead of the drawing. That is what the studio's
+  // capture-and-clean step produces, and what a garment saved from
+  // search would carry — the page needs no change to show real
+  // clothes, only real files.
+  function shade(hex, amt){
+    return '#' + rgb(hex).map(function(v){
+      var n = Math.max(0, Math.min(255, v + amt));
+      return ('0' + n.toString(16)).slice(-2);
+    }).join('');
+  }
+
+  // A weave per cloth. Denim runs on the diagonal, knits rib
+  // vertically, cord has wales twice the width, linen is a crosshatch,
+  // leather is speckle. Silks and jerseys get nothing — they are
+  // smooth, and the gradient alone is the right answer for them.
+  function weave(tex, id, ink){
+    var t = tex || '', o = '.16';
+    if (/denim|gabardine/.test(t))
+      return '<pattern id="'+id+'" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+             '<line x1="0" y1="0" x2="0" y2="5" stroke="'+ink+'" stroke-width="1.1" opacity="'+o+'"/></pattern>';
+    if (/rib|merino|lambswool|wool$|^wool/.test(t))
+      return '<pattern id="'+id+'" width="4" height="4" patternUnits="userSpaceOnUse">' +
+             '<line x1="1" y1="0" x2="1" y2="4" stroke="'+ink+'" stroke-width="1" opacity="'+o+'"/></pattern>';
+    if (/cord/.test(t))
+      return '<pattern id="'+id+'" width="7" height="7" patternUnits="userSpaceOnUse">' +
+             '<line x1="2" y1="0" x2="2" y2="7" stroke="'+ink+'" stroke-width="2.2" opacity=".2"/></pattern>';
+    if (/linen|canvas|cotton/.test(t))
+      return '<pattern id="'+id+'" width="5" height="5" patternUnits="userSpaceOnUse">' +
+             '<line x1="0" y1="2" x2="5" y2="2" stroke="'+ink+'" stroke-width=".9" opacity=".12"/>' +
+             '<line x1="2" y1="0" x2="2" y2="5" stroke="'+ink+'" stroke-width=".9" opacity=".12"/></pattern>';
+    if (/leather|waxed/.test(t))
+      return '<pattern id="'+id+'" width="6" height="6" patternUnits="userSpaceOnUse">' +
+             '<circle cx="2" cy="2" r=".8" fill="'+ink+'" opacity=".14"/>' +
+             '<circle cx="5" cy="4.5" r=".6" fill="'+ink+'" opacity=".1"/></pattern>';
+    return '';
+  }
+
+  // Construction, per shape. Coordinates are on a 160x200 field with
+  // the garment inside roughly x 26-134, y 26-182.
+  // Construction, per shape, on a 160x200 field.
+  //
+  // The first pass drew every garment at the same width and the same
+  // length, so a silk cami came out the width of a winter coat and a
+  // midi dress ended where a t-shirt ends. Recognisable shapes, wrong
+  // proportions — which is most of what "looks silly" was. A fashion
+  // flat is proportion before it is detail:
+  //
+  //   width   cami 40 · fitted 56 · straight 64 · oversized 72 · coat 84
+  //   length  cropped 132 · hip 152 · tunic 164 · midi 186 · maxi 190
+  //   shoulder narrower than the hem on anything tailored; wider only
+  //           on the deliberately oversized pieces
+  //
+  // Everything below is built to that table rather than eyeballed, so
+  // the rail reads as one wardrobe photographed the same way.
+  var SHAPE = {
+    shirt: function(){ return {
+      body:'M58 40 L72 34 L80 46 L88 34 L102 40 L124 52 L115 74 L108 68 L110 158 Q80 165 50 158 L52 68 L45 74 L36 52 Z',
+      detail:'<path d="M72 34 L80 46 L75 32 Z" fill="rgba(255,255,255,.18)"/>' +
+             '<path d="M88 34 L80 46 L85 32 Z" fill="rgba(255,255,255,.18)"/>' +
+             '<line x1="80" y1="46" x2="80" y2="160" stroke="rgba(0,0,0,.3)" stroke-width="1.3"/>' +
+             '<line x1="62" y1="72" x2="61" y2="156" stroke="rgba(0,0,0,.09)" stroke-width="1"/>' +
+             [60,82,104,126,148].map(function(y){ return '<circle cx="80" cy="'+y+'" r="2" fill="rgba(255,255,255,.55)"/>'; }).join('') }; },
+    tee: function(){ return {
+      body:'M62 42 Q80 34 98 42 L118 51 L110 70 L104 65 L106 146 Q80 152 54 146 L56 65 L50 70 L42 51 Z',
+      detail:'<path d="M69 40 Q80 50 91 40 Q80 36 69 40 Z" fill="rgba(0,0,0,.2)"/>' +
+             '<line x1="55" y1="139" x2="105" y2="139" stroke="rgba(0,0,0,.1)" stroke-width="1.2"/>' }; },
+    cami: function(){ return {
+      body:'M66 56 Q80 52 94 56 L98 148 Q80 154 62 148 Z',
+      detail:'<path d="M70 56 L74 34" stroke="currentColor" stroke-width="2.8" fill="none" opacity=".9"/>' +
+             '<path d="M90 56 L86 34" stroke="currentColor" stroke-width="2.8" fill="none" opacity=".9"/>' +
+             '<path d="M66 56 Q80 63 94 56 L94 61 Q80 68 66 61 Z" fill="rgba(255,255,255,.24)"/>' }; },
+    knit: function(){ return {
+      body:'M56 46 Q80 38 104 46 L126 56 L117 78 L110 73 L110 150 L110 160 Q80 167 50 160 L50 150 L50 73 L43 78 L34 56 Z',
+      detail:'<path d="M66 44 Q80 55 94 44 Q80 39 66 44 Z" fill="rgba(0,0,0,.22)"/>' +
+             '<rect x="50" y="149" width="60" height="11" fill="rgba(0,0,0,.15)"/>' +
+             '<rect x="35" y="57" width="11" height="9" fill="rgba(0,0,0,.15)"/>' +
+             '<rect x="114" y="57" width="11" height="9" fill="rgba(0,0,0,.15)"/>' }; },
+    cardi: function(){ return {
+      body:'M52 46 Q80 37 108 46 L131 57 L121 81 L113 76 L113 162 Q80 169 47 162 L47 76 L39 81 L29 57 Z',
+      detail:'<line x1="80" y1="42" x2="80" y2="165" stroke="rgba(0,0,0,.3)" stroke-width="1.6"/>' +
+             '<rect x="47" y="151" width="66" height="11" fill="rgba(0,0,0,.14)"/>' +
+             [58,80,102,124,146].map(function(y){ return '<circle cx="74" cy="'+y+'" r="2.3" fill="rgba(0,0,0,.34)"/>'; }).join('') }; },
+    rollneck: function(){ return {
+      body:'M60 56 Q80 48 100 56 L120 66 L112 87 L106 82 L107 152 Q80 159 53 152 L54 82 L48 87 L40 66 Z',
+      detail:'<path d="M69 56 Q80 63 91 56 L89 30 Q80 25 71 30 Z" fill="rgba(0,0,0,.24)"/>' +
+             '<line x1="71" y1="36" x2="89" y2="36" stroke="rgba(0,0,0,.18)" stroke-width="1"/>' +
+             '<rect x="54" y="144" width="53" height="8" fill="rgba(0,0,0,.12)"/>' }; },
+    vest: function(){ return {
+      body:'M62 46 L74 43 L80 62 L86 43 L98 46 L104 62 L104 144 Q80 150 56 144 L56 62 Z',
+      detail:'<path d="M74 43 L80 62 L86 43 Z" fill="rgba(0,0,0,.24)"/>' +
+             '<rect x="56" y="136" width="48" height="8" fill="rgba(0,0,0,.15)"/>' }; },
+    trouser: function(){ return {
+      body:'M54 40 H106 L110 58 L103 184 H86 L80 100 L74 184 H57 L50 58 Z',
+      detail:'<rect x="54" y="40" width="52" height="13" fill="rgba(0,0,0,.17)"/>' +
+             '<line x1="66" y1="58" x2="65" y2="182" stroke="rgba(255,255,255,.3)" stroke-width="1.3"/>' +
+             '<line x1="94" y1="58" x2="95" y2="182" stroke="rgba(255,255,255,.3)" stroke-width="1.3"/>' +
+             '<path d="M80 53 L80 80" stroke="rgba(0,0,0,.26)" stroke-width="1.1" fill="none"/>' }; },
+    jean: function(){ return {
+      body:'M54 40 H106 L110 58 L103 184 H86 L80 100 L74 184 H57 L50 58 Z',
+      detail:'<rect x="54" y="40" width="52" height="12" fill="rgba(0,0,0,.22)"/>' +
+             '<path d="M58 54 q9 8 11 19" fill="none" stroke="rgba(255,255,255,.32)" stroke-width="1.2"/>' +
+             '<path d="M102 54 q-9 8 -11 19" fill="none" stroke="rgba(255,255,255,.32)" stroke-width="1.2"/>' +
+             '<path d="M80 52 v20" stroke="rgba(255,255,255,.26)" stroke-width="1.1" fill="none"/>' +
+             '<circle cx="61" cy="56" r="1.5" fill="rgba(255,255,255,.5)"/>' +
+             '<circle cx="99" cy="56" r="1.5" fill="rgba(255,255,255,.5)"/>' }; },
+    skirt: function(){ return {
+      body:'M60 44 H100 L114 150 Q80 158 46 150 Z',
+      detail:'<rect x="60" y="44" width="40" height="12" fill="rgba(0,0,0,.19)"/>' +
+             '<line x1="73" y1="56" x2="66" y2="154" stroke="rgba(0,0,0,.13)" stroke-width="1.1"/>' +
+             '<line x1="87" y1="56" x2="94" y2="154" stroke="rgba(0,0,0,.13)" stroke-width="1.1"/>' }; },
+    dress: function(){ return {
+      body:'M64 44 Q80 36 96 44 L100 86 L116 180 Q80 190 44 180 L60 86 Z',
+      detail:'<path d="M70 42 Q80 53 90 42 Q80 37 70 42 Z" fill="rgba(0,0,0,.22)"/>' +
+             '<line x1="60" y1="86" x2="100" y2="86" stroke="rgba(0,0,0,.22)" stroke-width="1.3"/>' +
+             '<line x1="74" y1="90" x2="66" y2="184" stroke="rgba(0,0,0,.09)" stroke-width="1"/>' +
+             '<line x1="88" y1="90" x2="96" y2="184" stroke="rgba(0,0,0,.09)" stroke-width="1"/>' }; },
+    slip: function(){ return {
+      body:'M67 58 Q80 54 93 58 L104 182 Q80 190 56 182 Z',
+      detail:'<path d="M71 58 L75 32" stroke="currentColor" stroke-width="2.4" fill="none" opacity=".85"/>' +
+             '<path d="M89 58 L85 32" stroke="currentColor" stroke-width="2.4" fill="none" opacity=".85"/>' +
+             '<path d="M67 58 Q80 66 93 58 L93 63 Q80 71 67 63 Z" fill="rgba(255,255,255,.22)"/>' }; },
+    coat: function(){ return {
+      body:'M52 44 L70 36 L80 52 L90 36 L108 44 L134 57 L124 83 L116 78 L118 184 Q80 192 42 184 L44 78 L36 83 L26 57 Z',
+      detail:'<path d="M70 36 L80 52 L67 94 Z" fill="rgba(255,255,255,.15)"/>' +
+             '<path d="M90 36 L80 52 L93 94 Z" fill="rgba(255,255,255,.15)"/>' +
+             '<line x1="80" y1="52" x2="80" y2="184" stroke="rgba(0,0,0,.27)" stroke-width="1.4"/>' +
+             [100,126,152,176].map(function(y){ return '<circle cx="69" cy="'+y+'" r="2.5" fill="rgba(0,0,0,.34)"/>'; }).join('') }; },
+    trench: function(){ return {
+      body:'M52 44 L70 36 L80 52 L90 36 L108 44 L134 57 L124 83 L116 78 L118 182 Q80 190 42 182 L44 78 L36 83 L26 57 Z',
+      detail:'<path d="M70 36 L80 52 L64 92 Z" fill="rgba(255,255,255,.19)"/>' +
+             '<path d="M90 36 L80 52 L96 92 Z" fill="rgba(255,255,255,.19)"/>' +
+             '<rect x="43" y="116" width="74" height="10" fill="rgba(0,0,0,.25)"/>' +
+             '<rect x="74" y="114" width="13" height="14" fill="rgba(0,0,0,.35)"/>' +
+             '<path d="M53 51 L71 46 L73 68 L53 72 Z" fill="rgba(255,255,255,.13)"/>' +
+             [100,142,164].map(function(y){ return '<circle cx="67" cy="'+y+'" r="2.3" fill="rgba(0,0,0,.3)"/>'; }).join('') }; },
+    jacket: function(){ return {
+      body:'M54 44 L70 37 L80 51 L90 37 L106 44 L130 56 L120 80 L113 75 L114 146 Q80 154 46 146 L47 75 L40 80 L30 56 Z',
+      detail:'<path d="M70 37 L80 51 L67 82 Z" fill="rgba(255,255,255,.15)"/>' +
+             '<path d="M90 37 L80 51 L93 82 Z" fill="rgba(255,255,255,.15)"/>' +
+             '<line x1="80" y1="51" x2="80" y2="147" stroke="rgba(0,0,0,.3)" stroke-width="1.3"/>' +
+             '<rect x="55" y="102" width="18" height="13" fill="rgba(0,0,0,.18)"/>' +
+             '<rect x="87" y="102" width="18" height="13" fill="rgba(0,0,0,.18)"/>' +
+             '<rect x="47" y="138" width="67" height="8" fill="rgba(0,0,0,.16)"/>' }; },
+    boot: function(){ return {
+      body:'M46 88 L76 88 L83 116 Q89 132 104 138 L124 146 Q131 149 131 156 V162 H46 Z',
+      detail:'<rect x="44" y="160" width="90" height="8" rx="3" fill="rgba(0,0,0,.45)"/>' +
+             '<rect x="46" y="150" width="16" height="12" fill="rgba(0,0,0,.3)"/>' +
+             [98,110,122].map(function(y){ return '<line x1="52" y1="'+y+'" x2="71" y2="'+(y+4)+'" stroke="rgba(255,255,255,.35)" stroke-width="1.3"/>'; }).join('') +
+             '<path d="M46 88 H76 L78 96 H46 Z" fill="rgba(255,255,255,.17)"/>' }; },
+    loafer: function(){ return {
+      body:'M36 136 Q36 122 54 118 L90 118 Q107 120 120 130 L131 138 Q135 143 129 148 H44 Q36 148 36 142 Z',
+      detail:'<rect x="34" y="146" width="102" height="8" rx="3" fill="rgba(0,0,0,.45)"/>' +
+             '<path d="M56 120 q13 12 33 12" fill="none" stroke="rgba(0,0,0,.3)" stroke-width="1.5"/>' +
+             '<rect x="61" y="124" width="19" height="5" rx="2" fill="rgba(255,255,255,.38)"/>' }; },
+    maryjane: function(){ return {
+      body:'M38 136 Q38 122 56 118 L90 118 Q107 120 120 130 L130 138 Q134 143 128 148 H46 Q38 148 38 142 Z',
+      detail:'<rect x="36" y="146" width="100" height="8" rx="3" fill="rgba(0,0,0,.45)"/>' +
+             '<path d="M54 120 q6 -15 22 -15 q16 0 20 15" fill="none" stroke="rgba(0,0,0,.3)" stroke-width="2.2"/>' +
+             '<path d="M52 128 h42" stroke="rgba(0,0,0,.32)" stroke-width="2.8" fill="none"/>' +
+             '<circle cx="94" cy="128" r="2.2" fill="rgba(255,255,255,.5)"/>' }; },
+    trainer: function(){ return {
+      body:'M34 134 Q34 118 52 114 L84 114 Q102 116 117 128 L130 137 Q136 142 129 147 H42 Q34 147 34 140 Z',
+      detail:'<rect x="32" y="145" width="106" height="9" rx="4" fill="rgba(0,0,0,.4)"/>' +
+             '<path d="M48 118 q25 16 60 18" fill="none" stroke="rgba(0,0,0,.2)" stroke-width="1.8"/>' +
+             [53,63,73].map(function(x){ return '<line x1="'+x+'" y1="120" x2="'+(x+9)+'" y2="128" stroke="rgba(255,255,255,.45)" stroke-width="1.3"/>'; }).join('') +
+             '<path d="M98 122 q15 6 24 15" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="2.8"/>' }; },
+    // Accessories. Every one of these used to fall through to `tee`, so
+    // a handbag drew as a T-shirt on any piece without a photograph.
+    tote: function(){ return {
+      body:'M44 74 H116 L110 154 Q80 160 50 154 Z',
+      detail:'<path d="M60 74 q0 -28 20 -28 q20 0 20 28" fill="none" stroke="currentColor" stroke-width="5"/>' +
+             '<path d="M60 74 q0 -28 20 -28 q20 0 20 28" fill="none" stroke="rgba(0,0,0,.3)" stroke-width="1.4"/>' +
+             '<line x1="50" y1="86" x2="110" y2="86" stroke="rgba(0,0,0,.16)" stroke-width="1.2"/>' }; },
+    crossbody: function(){ return {
+      body:'M54 92 H106 L102 144 Q80 149 58 144 Z',
+      detail:'<path d="M58 94 q-12 -48 22 -48 q34 0 22 48" fill="none" stroke="currentColor" stroke-width="3.4"/>' +
+             '<path d="M54 92 H106 L104 113 Q80 118 56 113 Z" fill="rgba(0,0,0,.22)"/>' +
+             '<rect x="74" y="109" width="12" height="7" rx="2" fill="rgba(255,255,255,.5)"/>' }; },
+    glasses: function(){ return {
+      body:'M26 86 q0 -10 12 -10 h26 q10 0 12 9 q4 -3 8 -3 t8 3 q2 -9 12 -9 h26 q12 0 12 10 v5 ' +
+           'q0 19 -19 19 h-13 q-17 0 -19 -17 q-2 -5 -7 -5 t-7 5 q-2 17 -19 17 h-13 q-19 0 -19 -19 Z',
+      detail:'<path d="M27 86 L13 95" stroke="currentColor" stroke-width="4" fill="none"/>' +
+             '<path d="M133 86 L147 95" stroke="currentColor" stroke-width="4" fill="none"/>' +
+             '<path d="M36 85 q9 -4 21 -2" fill="none" stroke="rgba(255,255,255,.45)" stroke-width="2.4"/>' +
+             '<path d="M92 85 q9 -4 21 -2" fill="none" stroke="rgba(255,255,255,.45)" stroke-width="2.4"/>' }; },
+    watch: function(){ return {
+      body:'M67 42 q13 -4 26 0 l3 116 q-16 5 -32 0 Z',
+      detail:'<circle cx="80" cy="100" r="27" fill="rgba(0,0,0,.3)"/>' +
+             '<circle cx="80" cy="100" r="23" fill="#F7F4ED"/>' +
+             '<line x1="80" y1="100" x2="80" y2="84" stroke="rgba(0,0,0,.6)" stroke-width="2"/>' +
+             '<line x1="80" y1="100" x2="92" y2="106" stroke="rgba(0,0,0,.6)" stroke-width="2"/>' +
+             [56,74,126,144].map(function(y){
+               return '<line x1="70" y1="'+y+'" x2="90" y2="'+y+'" stroke="rgba(0,0,0,.2)" stroke-width="1.2"/>'; }).join('') }; },
+    scarf: function(){ return {
+      body:'M58 36 q22 -7 44 0 l-8 44 q9 38 4 72 h-36 q-5 -34 4 -72 Z',
+      detail:'<line x1="80" y1="40" x2="80" y2="150" stroke="rgba(0,0,0,.12)" stroke-width="1.4"/>' +
+             [64,72,80,88,96].map(function(x){
+               return '<line x1="'+x+'" y1="150" x2="'+x+'" y2="163" stroke="currentColor" stroke-width="2.4"/>'; }).join('') }; }
+  };
+
+  function svg(p, cls){
+    // Real imagery wins whenever it exists — but only as a data: URI.
+    //
+    // The restriction is the whole reason this is safe to ship. A
+    // published page must fetch NOTHING: it has to render on a cold
+    // edge, offline, under a CSP, and a remote <img> would quietly
+    // break that while looking fine on a warm connection. A data URI
+    // is bytes already in the document. So a photo either travels
+    // inside the page or it does not travel at all, and a caller who
+    // hands this an http URL gets the drawing rather than a silent
+    // outbound request.
+    if (p.photo && /^data:image\//.test(p.photo)) {
+      return '<img class="' + (cls||'') + '" src="' + p.photo + '" alt="' + p.n + '" loading="lazy">';
+    }
+    var uid = 'g' + p.id.replace(/[^a-z0-9]/gi, '');
+    var parts = (SHAPE[p.sh] || SHAPE.tee)();
+    var w = weave(p.tex, uid + 'w', shade(p.hex, -90));
+    return '<svg viewBox="0 0 160 200" class="' + (cls||'') + '" style="color:' + p.hex + '" aria-hidden="true">' +
+      '<defs>' +
+        '<linearGradient id="' + uid + 'g" x1="0" y1="0" x2="1" y2="1">' +
+          '<stop offset="0" stop-color="' + shade(p.hex, 26) + '"/>' +
+          '<stop offset=".55" stop-color="' + p.hex + '"/>' +
+          '<stop offset="1" stop-color="' + shade(p.hex, -26) + '"/>' +
+        '</linearGradient>' + w +
+      '</defs>' +
+      '<path d="' + parts.body + '" fill="url(#' + uid + 'g)"/>' +
+      (w ? '<path d="' + parts.body + '" fill="url(#' + uid + 'w)"/>' : '') +
+      '<path d="' + parts.body + '" fill="none" stroke="' + shade(p.hex, -60) + '" stroke-width="1.4" stroke-linejoin="round"/>' +
+      parts.detail +
+      '</svg>';
+  }
+
+
+  function capsuleFor(nights, weather){
+    var wet = weather === 'rain', cold = weather === 'cold';
+    var pool = PIECES.filter(function(p){
+      if (wet && (p.c === 'shoes' || p.c === 'outer') && !p.rain) return false;
+      if (cold && p.warm === 0) return false;
+      return p.occ.indexOf('travel') > -1 || p.occ.indexOf('dinner') > -1 || p.occ.indexOf('weekend') > -1;
+    });
+    var outfits = function(set){
+      var t = set.filter(function(p){ return p.c==='tops' || p.c==='knit'; }).length;
+      var b = set.filter(function(p){ return p.c==='bottoms'; }).length;
+      var d = set.filter(function(p){ return p.c==='dress'; }).length;
+      var s = set.filter(function(p){ return p.c==='shoes'; }).length;
+      return (t * b + d) * s;
+    };
+    // What this trip wants, beyond looking coherent. Without the
+    // weather terms a cold capsule came out IDENTICAL to a mild one —
+    // the pool filter dropped two summer pieces and nothing else
+    // changed, so the page showed the same suitcase for Reykjavik and
+    // Rome and called it planning.
+    var score = function(p){
+      return (200 - p.match.distance) + (cold ? p.warm * 14 : 0) + (wet && p.rain ? 18 : 0);
+    };
+    var bestIn = function(c){
+      return pool.filter(function(p){ return p.c === c; })
+        .sort(function(a,b){ return score(b) - score(a); })[0];
+    };
+
+    // Essentials FIRST. Pure greedy cold-starts at zero: with an empty
+    // suitcase every candidate adds zero complete outfits, so the tie
+    // -break decided everything and it packed seven high-matching tops,
+    // no shoes, and reported a capsule with no outfits in it at all.
+    var chosen = [];
+    ['shoes','bottoms','tops'].forEach(function(c){
+      var p = bestIn(c); if (p) chosen.push(p);
+    });
+    var budget = Math.min(pool.length, Math.max(5, Math.round(nights * 1.6) + 3));
+    while (chosen.length < budget) {
+      var best = null, bestGain = -1, bestScore = -1;
+      pool.forEach(function(p){
+        if (chosen.indexOf(p) > -1) return;
+        var gain = outfits(chosen.concat([p])) - outfits(chosen);
+        var sc = score(p);
+        if (gain > bestGain || (gain === bestGain && sc > bestScore)) {
+          bestGain = gain; bestScore = sc; best = p;
+        }
+      });
+      if (!best) break;
+      chosen.push(best);
+    }
+    // One coat, always — outfit-counting cannot see weather.
+    var coat = pool.filter(function(p){ return p.c === 'outer'; })
+      .sort(function(a,b){ return wet ? (b.rain - a.rain) || (b.warm - a.warm) : b.warm - a.warm; })[0];
+    if (coat && chosen.indexOf(coat) === -1) chosen.push(coat);
+    return { pieces: chosen, outfits: outfits(chosen) };
+  }
+
+  // ── State ──────────────────────────────────────────────────────
+  var occ='work', wx='mild', mood='any', idx=0, filter='all';
+  var days=3, twx='mild';
+  var $ = function(id){ return document.getElementById(id); };
+
+  var BRIEFS = {
+    remix: 'a private digital wardrobe where I can browse and filter everything I own, ask what to wear using only my clothes, see my colour family, build weather-aware packing capsules and spot the gaps',
+    add:   'add a garment to my wardrobe from a photo - clean it into a catalogue image and suggest the colour and category for me to check',
+    tryon: 'show me wearing this outfit - same face, same garments, several looks'
+  };
+  $('ho-remix').href = 'https://ontold.com/?compose=' + encodeURIComponent(BRIEFS.remix);
+  $('ho-add').href   = 'https://ontold.com/?compose=' + encodeURIComponent(BRIEFS.add);
+  $('ho-tryon').href = 'https://ontold.com/?compose=' + encodeURIComponent(BRIEFS.tryon);
+
+  var BAND = { in:['in','In palette'], near:['near','Near'], out:['out','Outside'] };
+
+  // ── The flat-lay ───────────────────────────────────────────────
+  // The outfit as ONE composition rather than a row of items. A row
+  // reads as inventory; overlapping pieces at different scales read as
+  // something someone laid out on a bed. Positions are derived from the
+  // garment's category so the arrangement is stable per look — a coat
+  // sits behind, shoes sit low and small, a bag tucks into the corner.
+  var LAYOUT = {
+    outer:     { w:42, x:-1, y:0,  z:1 },
+    dress:     { w:34, x:26, y:2,  z:2 },
+    tops:      { w:32, x:28, y:0,  z:3 },
+    knit:      { w:34, x:26, y:0,  z:3 },
+    bottoms:   { w:31, x:56, y:12, z:2 },
+    shoes:     { w:25, x:20, y:60, z:4 },
+    accessory: { w:23, x:62, y:58, z:5 }
+  };
+  function finish(look){
+    // Accessories have to ANSWER the outfit, not rank against a fixed
+    // list. The first version sorted every accessory by palette distance
+    // and took the first bag and the first small thing, which is a
+    // constant — so the same tote and the same scarf turned up in all
+    // eighty looks, in every weather. Sameness that looks like a
+    // rendering bug because it is one.
+    //
+    // So each slot has a rule that reads the look:
+    //   bag    a tote carries a laptop, which is work and travel; every
+    //          other day gets the crossbody. Between candidates, take
+    //          the one that CONTRASTS the outfit — an all-dark look gets
+    //          the tan bag, a pale one gets the black.
+    //   small  the weather decides first: cold wants the scarf. Warm
+    //          days split by occasion — a watch is a work and dinner
+    //          thing, sunglasses belong to weekends and travel.
+    var acc = function(re){
+      return PIECES.filter(function(p){ return p.c === 'accessory' && re.test(p.n); });
+    };
+    var darkish = look.filter(function(p){ return p.tone === 'dark'; }).length >= 2;
+    var contrast = function(list){
+      return list.slice().sort(function(a, b){
+        var wants = darkish ? 'light' : 'dark';
+        var score = function(p){ return (p.tone === wants ? 0 : p.tone === 'mid' ? 1 : 2); };
+        return score(a) - score(b) || a.match.distance - b.match.distance;
+      })[0] || null;
+    };
+
+    var bags = acc(/bag|tote|crossbody/i).filter(function(p){
+      return /tote/i.test(p.n) ? (occ === 'work' || occ === 'travel') : true;
+    });
+    var bag = contrast(bags);
+
+    var small = wx === 'cold' ? acc(/scarf/i)[0]
+              : (occ === 'work' || occ === 'dinner') ? acc(/watch/i)[0]
+              : acc(/sunglass/i)[0];
+    // A dress already carries the look; a second layered piece crowds
+    // the lay rather than styling it.
+    if (byCat(look, 'dress') && look.length > 3) small = null;
+
+    return look.concat([bag, small].filter(Boolean));
+  }
+
+  function total(list){ return list.reduce(function(a, p){ return a + p.p; }, 0); }
+
+  function flatLay(look){
+    var seen = {};
+    return finish(look).map(function(p){
+      var l = LAYOUT[p.c] || LAYOUT.tops;
+      var n = (seen[p.c] = (seen[p.c] || 0) + 1) - 1;
+      return '<figure style="width:' + l.w + '%;left:' + (l.x + n * 24) + '%;top:' + (l.y + n * 6) +
+        '%;height:' + (l.w * 1.55) + '%;z-index:' + (l.z + n) + '">' + svg(p) + '</figure>';
+    }).join('');
+  }
+
+  // ── Naming a look ──────────────────────────────────────────────
+  // The mockup names its outfits ("Effortless Everyday · Casual •
+  // Comfortable") and that reads far better than "Black sweater and
+  // black jeans". Names are composed from what the look actually IS, so
+  // they cannot describe an outfit that was not built.
+  // Four names and five cards meant the fifth was called "Workday"
+  // again, next to the first one. Eight, and past that the look names
+  // itself from the piece that makes it different — so two cards can
+  // never carry the same name however long the rail gets.
+  var NAME_BY_OCC = { work:['Workday','Desk to drinks','Quiet authority','On the record',
+                            'Second coffee','The long meeting','Early start','Presenting'],
+                      weekend:['Effortless everyday','Coffee run','Saturday long way round','Nothing planned',
+                               'Market morning','Someone else\'s garden','Sunday, late','Out for air'],
+                      dinner:['Dinner out','Booked for eight','Somewhere dark','Late table',
+                              'His birthday','Wine bar','The good restaurant','After'],
+                      travel:['Departure lounge','Seat 14A','Two-night bag','Arrivals',
+                              'Red-eye','One carry-on','Train north','Landing late'] };
+  var MOOD_TAG = { any:'Easy', polished:'Polished', easy:'Comfortable', bold:'Statement', quiet:'Understated' };
+  function nameFor(look, i){
+    var list = NAME_BY_OCC[occ];
+    if (i < list.length) return list[i];
+    // Past the written names, name it after what makes it itself —
+    // never a repeat, and still true of the look it labels.
+    var mark = byCat(look, 'outer') || byCat(look, 'dress') || byCat(look, 'shoes') || look[0];
+    return list[i % list.length] + ', with the ' + mark.s;
+  }
+  function tagFor(look){
+    // This took `look` and never read it: every card in the grid said
+    // "Work • Easy", because occasion and mood are the FILTER, and the
+    // filter is the same for everything the filter returned. A label
+    // that cannot differ between two cards is decoration.
+    var tones = look.map(function(p){ return p.tone; });
+    var has = function(t){ return tones.indexOf(t) > -1; };
+    var t = [cap(occ)];
+    if (has('light') && has('dark')) t.push('Light on dark');
+    else if (!has('light') && !has('dark')) t.push('Tonal');
+    else if (has('dark')) t.push('Dark');
+    else t.push('Light');
+    if (look.filter(function(p){ return p.temp === 'accent'; }).length) t.push('A colour in it');
+    if (byCat(look, 'dress')) t.push('One piece');
+    if (byCat(look, 'outer')) t.push('Layered');
+    if (wx === 'rain') t.push('Rainproof');
+    return t.join(' • ');
+  }
+
+  // ── Sidebar: the day, as controls that drive everything ────────
+  var AXES = {
+    occ:  { name:'Doing', label:{work:'Work',weekend:'Weekend',dinner:'Dinner',travel:'Travel'},
+            get:function(){return occ;}, set:function(v){ occ=v; idx=0; renderAll(); } },
+    wx:   { name:'Weather', label:{mild:'Mild',cold:'Cold',rain:'Rain'},
+            get:function(){return wx;}, set:function(v){ wx=v; twx=v; idx=0; renderAll(); } },
+    mood: { name:'Mood', label:{any:'Any',polished:'Polished',easy:'Easy',bold:'Bold',quiet:'Quiet'},
+            get:function(){return mood;}, set:function(v){ mood=v; idx=0; renderAll(); } },
+    days: { name:'Nights away', label:{2:'2',3:'3',5:'5',7:'7'},
+            get:function(){return String(days);}, set:function(v){ days=+v; renderTrip(); } }
+  };
+  function renderAxes(){
+    $('axes').innerHTML = Object.keys(AXES).map(function(k){
+      var a = AXES[k];
+      return '<div style="padding:.15rem .7rem .6rem">' +
+        '<div style="font-size:10.5px;color:var(--dim);margin-bottom:.35rem">' + a.name + '</div>' +
+        Object.keys(a.label).map(function(v){
+          return '<button type="button" data-axis="' + k + '" data-v="' + v + '" ' +
+            'style="display:inline-block;width:auto;padding:.3rem .6rem;margin:0 .25rem .25rem 0;' +
+            'border-radius:99px;font-size:12px;' +
+            (a.get() === v ? 'background:var(--ink);color:#fff;font-weight:600' : 'background:var(--plate)') +
+            '">' + a.label[v] + '</button>';
+        }).join('') + '</div>';
+    }).join('');
+  }
+  $('axes').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-axis]'); if (!b) return;
+    AXES[b.getAttribute('data-axis')].set(b.getAttribute('data-v'));
+    renderAxes();
+  });
+
+  // ── Home ───────────────────────────────────────────────────────
+  function todaysLooks(){ return looksFor(occ, wx, mood); }
+
+  function renderHome(){
+    var all = todaysLooks();
+    if (!all.length) {
+      $('hero-lay').innerHTML = '';
+      $('hero-p').textContent = 'Nothing on this rail satisfies all three at once. Loosen the mood — that is usually the one doing it.';
+      $('ideas').innerHTML = ''; return;
+    }
+    if (idx >= all.length) idx = 0;
+    var look = all[idx];
+    $('hero-h').textContent = nameFor(look, idx) + '.';
+    $('hero-p').textContent = colourNote(finish(look));
+    $('hero-lay').innerHTML = flatLay(look);
+    $('hero-lay').onclick = function(){ openLook(look, idx); };
+    $('ideas-h').textContent = 'Outfit ideas for ' + AXES.occ.label[occ].toLowerCase() +
+      (wx === 'rain' ? ' in the rain' : wx === 'cold' ? ' in the cold' : '');
+    $('ideas').innerHTML = all.slice(0, 5).map(function(l, i){
+      return '<button class="idea" type="button" data-i="' + i + '">' +
+        '<div class="lay">' + flatLay(l) + '</div>' +
+        '<h3>' + nameFor(l, i) + '</h3><p>' + tagFor(l) + '</p></button>';
+    }).join('');
+    $('all-looks').innerHTML = all.map(function(l, i){
+      // Count and price what the lay SHOWS. These read `l` while the
+      // picture beside them drew finish(l), so a card said "3 pieces"
+      // over five things and priced the outfit without the bag.
+      var w = finish(l);
+      return '<button class="idea" type="button" data-i="' + i + '">' +
+        '<div class="lay">' + flatLay(l) + '</div>' +
+        '<h3>' + nameFor(l, i) + '</h3><p>&pound;' + total(w) +
+        ' &middot; ' + w.length + ' pieces</p></button>';
+    }).join('');
+    $('looks-h').textContent = all.length + ' looks for today';
+    $('looks-sub').textContent = 'Every complete outfit this rail can make for ' +
+      AXES.occ.label[occ].toLowerCase() + ', ' + AXES.wx.label[wx].toLowerCase() +
+      ', feeling ' + AXES.mood.label[mood].toLowerCase() + '.';
+  }
+  function pickIdea(e){
+    var b = e.target.closest('.idea'); if (!b) return;
+    var all = todaysLooks(); var i = +b.getAttribute('data-i');
+    if (all[i]) openLook(all[i], i);
+  }
+  $('ideas').addEventListener('click', pickIdea);
+  $('all-looks').addEventListener('click', pickIdea);
+  $('shuffle').addEventListener('click', function(){
+    var all = todaysLooks(); if (!all.length) return;
+    idx = (idx + 1) % all.length; renderHome();
+  });
+
+  // ── The week ───────────────────────────────────────────────────
+  // Deterministic, and honest about what it is: seven days planned off
+  // the same rail with no outfit repeated. Not a record of what was
+  // worn — that needs an account, which a published page has not got.
+  var DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var DAY_OCC = ['work','work','work','work','dinner','weekend','weekend'];
+  function weekPlan(){
+    var used = {}, out = [];
+    DAYS.forEach(function(d, i){
+      var o = DAY_OCC[i];
+      var candidates = looksFor(o, wx, mood);
+      var pick = null;
+      for (var k = 0; k < candidates.length; k++) {
+        var key = candidates[k].map(function(p){ return p.id; }).join('|');
+        if (!used[key]) { used[key] = 1; pick = candidates[k]; break; }
+      }
+      if (!pick && candidates.length) pick = candidates[0];
+      out.push({ day:d, occ:o, look:pick });
+    });
+    return out;
+  }
+  function renderWeek(){
+    var plan = weekPlan();
+    var html = plan.map(function(d, i){
+      return '<button class="day" type="button" data-day="' + i + '">' +
+        '<b>' + d.day + '</b><span>' + cap(d.occ) + '</span>' +
+        '<div class="lay">' + (d.look ? flatLay(d.look) : '') + '</div></button>';
+    }).join('');
+    $('week').innerHTML = html.split('</button>').slice(0,5).join('</button>') + '</button>';
+    $('full-week').innerHTML = html;
+    [$('week'), $('full-week')].forEach(function(el){
+      el.onclick = function(e){
+        var b = e.target.closest('.day'); if (!b) return;
+        var d = plan[+b.getAttribute('data-day')];
+        if (d && d.look) openLook(d.look, +b.getAttribute('data-day'));
+      };
+    });
+  }
+
+  // ── Right rail: every figure computed ──────────────────────────
+  function renderPanels(){
+    var byCat2 = {};
+    PIECES.forEach(function(p){ byCat2[p.c] = (byCat2[p.c] || 0) + 1; });
+    $('counts').innerHTML = CATS.filter(function(c){ return c[0] !== 'all'; }).map(function(c){
+      return '<div><b>' + (byCat2[c[0]] || 0) + '</b><span>' + c[1] + '</span></div>';
+    }).join('');
+
+    // Reach: how many pieces appear in at least one complete look across
+    // every kind of day. The mockup's "you're using 68% of your wardrobe"
+    // needs wear history; this needs only the rail, and answers the same
+    // question — what is actually earning its space.
+    var appearances = {};
+    ['work','weekend','dinner','travel'].forEach(function(o){
+      ['mild','cold','rain'].forEach(function(w){
+        looksFor(o, w, 'any').forEach(function(l){
+          l.forEach(function(p){ appearances[p.id] = (appearances[p.id] || 0) + 1; });
+        });
+      });
+    });
+    var reach = PIECES.filter(function(p){ return appearances[p.id]; }).length;
+    var pct = Math.round(reach / PIECES.length * 100);
+    $('usage').innerHTML = '<h3>' + pct + '% of your rail reaches a look</h3>' +
+      '<div class="meter"><i style="width:' + pct + '%"></i></div>' +
+      '<p class="note">' + reach + ' of ' + PIECES.length + ' pieces complete an outfit for some ' +
+      'kind of day. The rest need something you do not own yet.</p>';
+
+    var ranked = PIECES.slice().sort(function(a,b){ return (appearances[b.id]||0) - (appearances[a.id]||0); });
+    var top = ranked.slice(0, 5);
+    var idle = ranked.filter(function(p){ return !appearances[p.id]; });
+    var thin = ranked[ranked.length - 1];
+    $('insights').innerHTML = '<h3>Style insights</h3>' +
+      '<div class="insight"><b>Hardest working</b><p>' + top[0].n + ' appears in ' +
+        appearances[top[0].id] + ' looks — more than anything else you own.</p>' +
+        '<div class="dots">' + top.map(function(p){
+          return '<span style="background:' + p.hex + '"></span>'; }).join('') + '</div></div>' +
+      '<div class="insight"><b>' + (idle.length ? 'Earning nothing' : 'Least used') + '</b><p>' +
+        (idle.length
+          ? idle.length + ' piece' + (idle.length === 1 ? '' : 's') + ' complete no outfit at all — starting with ' + idle[0].n + '.'
+          : thin.n + ' appears in only ' + (appearances[thin.id] || 0) + ' looks.') +
+        '</p></div>' +
+      '<div class="insight"><b>Outside your palette</b><p>' +
+        PIECES.filter(function(p){ return p.match.band === 'out'; }).length +
+        ' pieces sit outside a Deep Winter palette. They are the warm neutrals.</p></div>';
+  }
+
+  // ── Wardrobe rail ──────────────────────────────────────────────
+  /** One garment, as a card. Shared by the wardrobe pane and the home
+   *  strip so the two cannot drift. */
+  function pieceCard(p){
+    return '<button class="piece" type="button" data-id="' + p.id + '">' +
+      '<span class="plate">' + svg(p) + '</span>' +
+      '<h3>' + p.n + '</h3><p>' + p.note + ' &middot; &pound;' + p.p + '</p>' +
+      '<span class="tag ' + BAND[p.match.band][0] + '">' + BAND[p.match.band][1] +
+      ' &middot; ' + p.match.shade.name + '</span></button>';
+  }
+
+  function renderFilters(){
+    $('filters').innerHTML = CATS.map(function(c){
+      return '<button type="button" data-filter="' + c[0] + '" aria-pressed="' +
+        (filter === c[0]) + '">' + c[1] + '</button>';
+    }).join('');
+  }
+  function drawRail(){
+    var shown = PIECES.filter(function(p){ return filter === 'all' || p.c === filter; });
+    $('rail').innerHTML = shown.map(pieceCard).join('');
+    $('empty').hidden = shown.length > 0;
+    drawHomeRail();
+  }
+
+  /** The same pieces on the home pane, cut to a strip.
+   *
+   *  One renderer, so a garment can never look like two different
+   *  things on two panes — and the count is rendered rather than
+   *  written, like every other number here. */
+  function drawHomeRail(){
+    // The header said "30 pieces" and the hero said "Thirty things" as
+    // static copy. Ten garments were added and both became lies — on a
+    // page whose whole rule is that a number is computed or not shown.
+    // Counted now, like everything else.
+    $('who-count').textContent = 'Your rail \u00b7 ' + PIECES.length + ' pieces';
+    var strip = PIECES.slice(0, 8);
+    $('home-rail-sub').textContent = PIECES.length + ' pieces on the rail.';
+    $('home-rail').innerHTML = strip.map(pieceCard).join('');
+  }
+
+  // ── Colour ─────────────────────────────────────────────────────
+  function renderFamilies(){
+    var out = [];
+    FAMILIES.forEach(function(f){
+      f.shades.forEach(function(sh){
+        var light = rgb(sh[1]).reduce(function(a,b){ return a+b; },0) / 3 > 140;
+        out.push('<div class="band" style="background:' + sh[1] + ';color:' +
+          (light ? '#111112' : '#FBFAF8') + '">' + (sh[2] ? '<i>Core</i>' : '') +
+          '<b>' + sh[0] + '</b></div>');
+      });
+    });
+    $('families').innerHTML = out.join('');
+  }
+
+  // ── Packing + gaps ─────────────────────────────────────────────
+  function renderTrip(){
+    var c = capsuleFor(days, twx);
+    var per = c.pieces.length ? (c.outfits / c.pieces.length).toFixed(1) : '0';
+    $('trip-figs').innerHTML =
+      '<div class="fig"><b>' + c.pieces.length + '</b><span>Pieces packed</span></div>' +
+      '<div class="fig"><b>' + c.outfits + '</b><span>Complete outfits</span></div>' +
+      '<div class="fig"><b>' + per + '</b><span>Outfits per piece</span></div>' +
+      '<div class="fig"><b>' + days + '</b><span>Nights covered</span></div>';
+    $('trip-lay').innerHTML = c.pieces.map(function(p){
+      return '<span class="plate" style="background:var(--plate);border-radius:9px;padding:.5rem;' +
+        'width:104px;display:inline-block">' + svg(p) + '</span>';
+    }).join('');
+  }
+  function renderGaps(){
+    var rows = [];
+    ['work','weekend','dinner','travel'].forEach(function(o){
+      ['mild','cold','rain'].forEach(function(w){
+        rows.push({ occ:o, wx:w, n: looksFor(o, w, 'any').length });
+      });
+    });
+    rows.sort(function(a,b){ return a.n - b.n; });
+    function limiter(o, w){
+      var counts = ['tops','bottoms','shoes','outer','dress'].map(function(c){
+        return { c:c, n: PIECES.filter(function(p){
+          return p.c === c && p.occ.indexOf(o) > -1 &&
+            (w !== 'rain' || (c !== 'shoes' && c !== 'outer') || p.rain); }).length };
+      });
+      counts.sort(function(a,b){ return a.n - b.n; });
+      return counts[0];
+    }
+    $('gaps').innerHTML = rows.slice(0,4).map(function(r){
+      var l = limiter(r.occ, r.wx);
+      return '<div class="gap"><span><em>' + cap(r.occ) + ', ' + r.wx + '</em> &mdash; ' +
+        (l.n === 0 ? 'no ' + l.c + ' at all for this' : 'only ' + l.n + ' ' + l.c + ' that works') +
+        '</span><span class="n">' + r.n + ' look' + (r.n === 1 ? '' : 's') + '</span></div>';
+    }).join('');
+    renderPlaces();
+  }
+
+  // ── Where it all lives ─────────────────────────────────────────
+  //
+  // Founder: "should we also do faux places where they are stored if
+  // you see the demo real-estate image" — yes, and the data was
+  // already here. Every garment carries a `spot` ("Rail, right end",
+  // "Shoe box, under the bed", "Bedside dish") and it was printed
+  // nowhere but one line of a detail panel.
+  //
+  // A wardrobe is not a grid of cards, it is places in a home, which
+  // is what a property listing understands and a clothes app usually
+  // does not. It also earns its place rather than decorating: half of
+  // having nothing to wear is forgetting what is in the drawer you
+  // never open, and this counts which places today's looks actually
+  // reach into. Counted, like everything else on this page — the
+  // dashed border means nothing in that place is in a single look
+  // today, and the page can only say so because it looked.
+  function renderPlaces(){
+    var today = todaysLooks().slice(0, 12);
+    var inUse = {};
+    today.forEach(function(l){ l.forEach(function(p){ inUse[p.id] = true; }); });
+
+    var order = [], byPlace = {};
+    PIECES.forEach(function(p){
+      if (!byPlace[p.spot]) { byPlace[p.spot] = []; order.push(p.spot); }
+      byPlace[p.spot].push(p);
+    });
+    var cold = order.filter(function(spot){
+      return !byPlace[spot].some(function(p){ return inUse[p.id]; });
+    }).length;
+    // The count is rendered, never written into the copy: it changes
+    // with the occasion and the weather, and this page does not print
+    // a number it has not just worked out.
+    $('places-sub').textContent = order.length + ' places, and today\u2019s looks reach into '
+      + (order.length - cold) + ' of them. The drawer you never open is not a metaphor \u2014 '
+      + 'it is the ' + cold + ' marked below.';
+    renderAI(inUse, order, byPlace);
+    $('places').innerHTML = order.map(function(spot){
+      var kit = byPlace[spot];
+      var live = kit.filter(function(p){ return inUse[p.id]; }).length;
+      return '<div class="place' + (live ? '' : ' cold') + '">' +
+        '<p class="place-h"><b>' + spot + '</b><span>' + live + '/' + kit.length + '</span></p>' +
+        '<ul>' + kit.map(function(p){
+          return '<li' + (inUse[p.id] ? ' class="on"' : '') + '>' + p.s + '</li>';
+        }).join('') + '</ul>' +
+        (live ? '' : '<p class="note">Nothing in here is in a look today.</p>') +
+        '</div>';
+    }).join('');
+  }
+
+  // ── What needs a model, and what it would do with THIS wardrobe ──
+  //
+  // Founder: "add the ai stuff". The page has always known its three
+  // boundaries — a live forecast needs a key that cannot sit in a
+  // public document, photographing a garment needs upload plus an edit
+  // model, seeing yourself in a look needs cast grounding and
+  // render-to-real — and it said so in a footer disclaimer. So the most
+  // interesting thing about the product read as an apology.
+  //
+  // They are the reason to open the studio, and each one is asked with
+  // the wardrobe it would work on: the count of pieces drawn as shapes
+  // because no photograph exists, the places nothing reaches today, the
+  // exact look on the rail. A hand-off that carries context is a
+  // different offer from a link.
+  function renderAI(inUse, order, byPlace){
+    var noPhoto = PIECES.filter(function(p){ return !p.photo; }).length;
+    var cold = order.filter(function(spot){
+      return !byPlace[spot].some(function(p){ return inUse[p.id]; });
+    }).length;
+    var top = todaysLooks()[0];
+    var card = function(title, body, why, cta, href){
+      return '<div class="ai-card"><b>' + title + '</b><p>' + body + '</p>' +
+        '<span class="why">' + why + '</span>' +
+        '<a href="' + href + '">' + cta + ' &rarr;</a></div>';
+    };
+    $('ai').innerHTML =
+      card('Photograph what you own',
+           'Upload a garment and an edit model cuts it out, reads its colour and files it. '
+           + noPhoto + ' pieces here are drawn as shapes because there is no photograph of them.',
+           'Needs upload and an edit model. A published page has neither.',
+           'Open the studio', 'https://ontold.com/?from=nothing-to-wear&want=wardrobe-photos') +
+      card('See yourself in the look',
+           'Not a mannequin &mdash; you, in ' + (top ? '&ldquo;' + nameFor(top, 0) + '&rdquo;' : 'a look from the rail')
+           + ', rendered from a grounded likeness rather than a generic body.',
+           'Needs cast grounding and render-to-real. Both are studio-side.',
+           'Try it on', 'https://ontold.com/?from=nothing-to-wear&want=try-on') +
+      card('Know the actual weather',
+           'The planner asks what the weather will be doing because it cannot look. With a key '
+           + 'it would read the forecast for the days you are packing for'
+           + (cold ? ', and tell you which of the ' + cold + ' untouched places to open.' : '.'),
+           'Needs a weather key, which cannot sit in a public document.',
+           'Wire it up', 'https://ontold.com/?from=nothing-to-wear&want=forecast');
+  }
+
+  // ── The sheet: where the depth lives ───────────────────────────
+  function partnersFor(piece, forOcc){
+    var need = piece.c === 'dress' ? ['shoes','outer']
+             : piece.c === 'shoes' ? ['tops','bottoms','dress']
+             : piece.c === 'bottoms' ? ['tops','knit','shoes']
+             : piece.c === 'accessory' ? ['tops','bottoms'] : ['bottoms','shoes'];
+    var out = [];
+    need.forEach(function(c){
+      PIECES.filter(function(q){ return q.c === c && q.occ.indexOf(forOcc) > -1 && q.id !== piece.id; })
+        .sort(function(a,b){ return a.match.distance - b.match.distance; })
+        .slice(0,2).forEach(function(q){ out.push(q); });
+    });
+    return out;
+  }
+  function why(piece, partner){
+    if (piece.temp === 'accent' && partner.temp !== 'accent') return 'Steps back and lets the ' + piece.s + ' talk.';
+    if ((piece.tone === 'dark' && partner.tone === 'light') ||
+        (piece.tone === 'light' && partner.tone === 'dark')) return 'Light against dark — the contrast this one needs.';
+    if (piece.tone === 'mid' && partner.tone !== 'mid') return 'Breaks the mid-tone so the pair does not go flat.';
+    if (piece.tone === partner.tone) return 'Same value, so it reads tonal. Texture has to do the work.';
+    if (partner.match.band === 'in') return 'Sits inside your palette, near ' + partner.match.shade.name + '.';
+    return 'Different enough in tone to stop it going flat.';
+  }
+  /** Shop the whole look, not a sleeve of it.
+   *
+   *  Founder: "we have a shopping module buy similar - outfit? in the
+   *  daily micros". Outfit — that is what the micros do, and it is the
+   *  only unit anyone actually wants: the point of a rail is the
+   *  combination, and one garment out of context is a different
+   *  purchase.
+   *
+   *  It hands the pieces to the shopping module rather than linking a
+   *  product, because there is no inventory behind this page and
+   *  inventing a shop link would be the same lie as inventing a wage.
+   *  The module is a site of its own; this carries the look to it. */
+  function shopLine(look){
+    var ids = look.map(function(p){ return p.id; }).join(',');
+    return '<div class="shopline">' +
+      '<span>Not in your wardrobe yet? Find this look, piece by piece.</span>' +
+      '<a href="https://shop-my-wardrobe.ontold.site/?look=' + encodeURIComponent(ids) + '">Buy similar &rarr;</a>' +
+      '</div>';
+  }
+
+  // Order to put it on in, and what each piece is doing there. Every
+  // line is read off the garment, so the sequence describes the outfit
+  // that was actually built rather than a written-once styling script.
+  var STEP_ORDER = ['dress','tops','knit','bottoms','outer','shoes','accessory'];
+  function stepNote(p){
+    if (p.c === 'dress') return 'One piece, so nothing else has to agree with it.';
+    if (p.c === 'bottoms') return cap(p.vol) + ' through the leg, ' + p.tex + '.';
+    if (p.c === 'outer') return 'Over the top and stays on &mdash; ' + p.tex +
+      (p.rain ? ', fine in the rain' : ', keep it dry') + '.';
+    if (p.c === 'shoes') return p.rain ? 'These take weather.' : 'Dry days only.';
+    if (p.c === 'accessory') return p.note + '.';
+    return cap(p.tex) + ', ' + p.vol + '.';
+  }
+  function styleSteps(worn){
+    return worn.slice().sort(function(a, b){
+      return STEP_ORDER.indexOf(a.c) - STEP_ORDER.indexOf(b.c);
+    }).map(function(p){
+      return '<li><span><b>' + p.n + '</b> &mdash; <em>' + stepNote(p) + '</em></span></li>';
+    }).join('');
+  }
+  // The palette, as the look wears it. A colour inside your analysis is
+  // named by its shade; one outside it is named by the piece it came
+  // from, because the nearest shade to a tan bag in a palette with no
+  // browns is "Cherry", and a tan square labelled Cherry is a lie.
+  function paletteRow(worn){
+    var seen = {};
+    return worn.map(function(p){
+      var inside = p.match.band !== 'out';
+      var label = inside ? p.match.shade.name : cap(p.s);
+      var key = inside ? label : p.hex;
+      if (seen[key]) return '';
+      seen[key] = 1;
+      return '<div class="swatch"><i style="background:' + p.hex + '"></i><b>' + label +
+        (inside ? '' : '<br>outside') + '</b></div>';
+    }).join('');
+  }
+  function openLook(look, i){
+    var g = GROOMING[occ];
+    var worn = finish(look);
+    var comp = compromiseNote(look, occ, wx);
+    var compText = comp ? comp.replace(/<[^>]+>/g,'').replace(/^Compromise/,'') : '';
+    $('sheet').innerHTML =
+      '<div class="sheet-head"><div class="lay">' + flatLay(look) + '</div>' +
+      '<div><h3 id="sheet-title">' + nameFor(look, i) + '</h3>' +
+      '<p class="price">&pound;' + total(worn) + ' &middot; ' + tagFor(look) + '</p></div>' +
+      '<button class="close" id="x" type="button" aria-label="Close">&times;</button></div>' +
+      '<p class="lbl" style="margin-top:0">How to wear it</p>' +
+      '<ul class="steps">' + styleSteps(worn) + '</ul>' +
+      '<p class="lbl">Colour palette</p><div class="swatches">' + paletteRow(worn) + '</div>' +
+      '<p class="lbl">Why it works</p>' +
+      '<ul class="reasons">' +
+        '<li><b>Colour</b>' + colourNote(worn) + '</li>' +
+        '<li><b>Shape</b>' + shapeNote(look) + '</li>' +
+        (MOODS[mood].line ? '<li><b>Mood</b>' + MOODS[mood].line + '</li>' : '') +
+        (compText ? '<li class="warn"><b>Compromise</b>' + compText + '</li>' : '') +
+        '<li><b>Hair</b>' + (wx === 'rain' ? RAIN_HAIR : g.hair) + '</li>' +
+        '<li><b>Face</b>' + g.face + '</li>' +
+        '<li><b>Where it is</b><span class="where">' + worn.map(function(p){
+          return '<span>' + p.n + ' &mdash; ' + p.spot + '</span>'; }).join('') + '</span></li>' +
+      '</ul>' + shopLine(look);
+    openDrawer();
+  }
+  function openPiece(id){
+    var p = PIECES.filter(function(x){ return x.id === id; })[0]; if (!p) return;
+    var occs = ['work','weekend','dinner','travel'].filter(function(o){ return p.occ.indexOf(o) > -1; });
+    function body(withOcc){
+      return '<div class="sheet-head"><span class="plate" style="flex:0 0 clamp(120px,20vw,180px);' +
+        'background:var(--plate);border-radius:12px;padding:1rem">' + svg(p) + '</span>' +
+        '<div><h3 id="sheet-title">' + p.n + '</h3>' +
+        '<p class="price">&pound;' + p.p + ' &middot; ' + p.note + '</p></div>' +
+        '<button class="close" id="x" type="button" aria-label="Close">&times;</button></div>' +
+        '<ul class="reasons">' +
+          '<li><b>Colour</b>Nearest shade is <em>' + p.match.shade.name + '</em> (' +
+            p.match.shade.family.toLowerCase() + '), ' + p.match.distance + ' away in RGB &mdash; ' +
+            BAND[p.match.band][1].toLowerCase() + '.</li>' +
+          '<li><b>Where</b>' + p.spot + '</li>' +
+          '<li><b>Wears</b>' + cap(p.tex) + ', ' + p.vol + ', ' +
+            (p.rain ? 'fine in the rain' : 'keep it out of the rain') + '.</li>' +
+        '</ul>' +
+        (occs.length ? '<div class="filters" style="margin:1.4rem 0 0">' + occs.map(function(o){
+          return '<button type="button" data-pair="' + o + '" aria-pressed="' + (o === withOcc) +
+            '">With ' + o + '</button>'; }).join('') + '</div>' : '') +
+        '<div class="pairs">' + partnersFor(p, withOcc).map(function(q){
+          return '<div class="pair"><span class="plate">' + svg(q) + '</span><div><b>' + q.n +
+            '</b><div class="why">' + why(p, q) + '</div></div></div>'; }).join('') + '</div>';
+    }
+    $('sheet').innerHTML = body(occs[0] || 'weekend');
+    $('sheet').onclick = function(e){
+      if (e.target.closest('#x')) { closeDrawer(); return; }
+      var c = e.target.closest('[data-pair]');
+      if (c) $('sheet').innerHTML = body(c.getAttribute('data-pair'));
+    };
+    openDrawer();
+  }
+  function openDrawer(){
+    $('drawer').setAttribute('open','');
+    var x = $('x'); if (x) { x.onclick = closeDrawer; x.focus(); }
+  }
+  function closeDrawer(){ $('drawer').removeAttribute('open'); }
+
+  // ── Wiring ─────────────────────────────────────────────────────
+  function show(view){
+    [].forEach.call(document.querySelectorAll('.view'), function(v){
+      v.classList.toggle('on', v.getAttribute('data-pane') === view);
+    });
+    [].forEach.call(document.querySelectorAll('#nav button'), function(b){
+      b.classList.toggle('on', b.getAttribute('data-view') === view);
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  document.addEventListener('click', function(e){
+    var v = e.target.closest('[data-view]');
+    if (v) { show(v.getAttribute('data-view')); return; }
+    var pc = e.target.closest('.piece');
+    if (pc) openPiece(pc.getAttribute('data-id'));
+  });
+  $('filters').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-filter]'); if (!b) return;
+    filter = b.getAttribute('data-filter'); drawRail();
+    [].forEach.call(this.querySelectorAll('button'), function(x){
+      x.setAttribute('aria-pressed', x === b ? 'true' : 'false');
+    });
+  });
+  $('drawer').addEventListener('click', function(e){ if (e.target === this) closeDrawer(); });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeDrawer(); });
+
+  function renderAll(){ renderHome(); renderWeek(); renderPanels(); renderTrip(); renderGaps(); }
+  renderAxes(); renderFilters(); drawRail(); renderFamilies(); renderAll();
+})();
+</script>
+</body></html>

@@ -1,0 +1,115 @@
+# Take a domain's inbound mail back from another provider.
+#
+# Founder: *"ontold.site works, but not ontold.com or screeningstudio."*
+#
+# ontold.site and ontold.com are configured identically on our side —
+# same sending subdomain, same DKIM, same everything. The difference is
+# inbound: ontold.site's MX points at Cloudflare and delivers, while
+# ontold.com's points at Mailgun and does not. So the fix is to take
+# inbound back, not to configure anything further.
+#
+# ## Everything else here refuses to do this
+#
+# `may_enable()` in email_routing.py exists precisely to stop a
+# provisioning run displacing whoever holds a domain's mail, because
+# that is a blast radius well past one reply address. This is the manual
+# override: separate file, separate request, report-only by default, and
+# meant to be used once, with evidence.
+#
+# The evidence here is direct rather than inferred — the address does not
+# arrive, and the identical arrangement on the sibling domain does.
+#
+# ## Two steps, and the first one has to be read
+#
+# Report first. It prints every record it would delete, with priority and
+# TTL, in a form that can be pasted back — a destructive change that
+# cannot be undone from its own output is one nobody should run. Then
+# apply, then enable routing.
+#
+#   echo '{"zone":"example.com","provider":"mailgun.org"}' \
+#     > .github/dispatch-requests/switch-inbound.json
+#   echo '{"zone":"...","provider":"...","apply":true}' > ...   # do it
+
+name: switch-inbound
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/switch-inbound.json'
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: 'Zone whose inbound moves to Cloudflare'
+        required: true
+      provider:
+        description: 'MX suffix to remove, e.g. mailgun.org'
+        required: true
+      apply:
+        description: 'Actually remove them (unticked = report only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: switch-inbound
+  cancel-in-progress: false
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      - name: What is being moved
+        id: what
+        env:
+          REQ: .github/dispatch-requests/switch-inbound.json
+          IN_ZONE: ${{ inputs.zone }}
+          IN_PROVIDER: ${{ inputs.provider }}
+          IN_APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          ZONE="${IN_ZONE:-}"; PROVIDER="${IN_PROVIDER:-}"; APPLY="${IN_APPLY:-false}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            ZONE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("zone",""))' "$REQ")
+            PROVIDER=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("provider",""))' "$REQ")
+            APPLY=$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1])).get("apply",False)).lower())' "$REQ")
+          fi
+          if [ -z "$ZONE" ] || [ -z "$PROVIDER" ]; then
+            echo "::error::need both zone and provider. Put {\"zone\":\"…\",\"provider\":\"…\"} in $REQ."
+            exit 1
+          fi
+          echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+          echo "provider=$PROVIDER" >> "$GITHUB_OUTPUT"
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+
+      - name: Move it
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set +e
+          set -o pipefail
+          {
+            echo "### Inbound · ${{ steps.what.outputs.zone }}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.what.outputs.apply }}" = "true" ]; then
+            python3 scripts/inbound_switch.py "${{ steps.what.outputs.zone }}" \
+              "${{ steps.what.outputs.provider }}" --apply | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/inbound_switch.py "${{ steps.what.outputs.zone }}" \
+              "${{ steps.what.outputs.provider }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          RC=$?
+          {
+            echo '```'
+            echo ""
+            echo "Removing the MX does not by itself give the domain a reply path — it only"
+            echo "clears the way. Run provision-email-routing.yml next."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

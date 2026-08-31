@@ -1,0 +1,85 @@
+name: Send one real email
+
+# The only check that proves this platform can send. Everything else
+# reads CONFIGURATION and reports on it — is the bearer set, does the
+# domain look right — and all of those can be green while nothing
+# arrives.
+#
+# Mail goes through the ontold-mcp Worker, which holds the send_email
+# binding. There is no Cloudflare token here to get wrong: the first
+# version of this workflow POSTed to the REST API and was refused
+# `401 10000`, a token without Email Sending.
+#
+# It sends to hello@ontold.site — ours, but a routing rule rather than a
+# VERIFIED DESTINATION. Cloudflare permits verified destinations long
+# before a sending domain is onboarded, so mailing an inbox we already
+# control would pass on a platform that can reach nobody. This is the
+# probe that tells them apart.
+#
+# It never mails an address from a workflow input, a branch name or a
+# form. This presents a bearer that can send and must not become a way
+# to make our domain write to somebody.
+#
+# Asked for, never incidental — the push trigger watches a request file
+# rather than this workflow's own path, because editing a file is not
+# asking for mail to be sent.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/send-test-email.json
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/dispatch-requests/send-test-email.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: send-test-email
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      # BEFORE the send, because it is the thing that explains a refusal
+      # rather than restating it. The first send that reached the
+      # binding came back `could not find domain config of sending
+      # domain`, and the address in the code has never been checked
+      # against the one that was actually onboarded — on this account
+      # that has already gone wrong once, with `mail.` in the code and
+      # `mx.` onboarded.
+      #
+      # Never fails the job: this is context for the answer below, not
+      # the answer.
+      - name: What is actually onboarded on the zone
+        continue-on-error: true
+        env:
+          # The purpose-scoped email credential when it exists, the
+          # deploy one otherwise. Preferring rather than replacing:
+          # CLOUDFLARE_API_TOKEN carries R2 and Workers Routes, which the
+          # email token deliberately does not, so these must never become
+          # the same secret.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          MAIL_DOMAIN: ${{ vars.MAIL_DOMAIN }}
+        run: |
+          set -o pipefail
+          python3 scripts/sending_domains.py "${MAIL_DOMAIN:-ontold.site}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Say what is configured, then prove it
+        env:
+          # Same order api/_mail resolves them in. NOTIFY_TOKEN first,
+          # so mail stops depending on the value that also governs /mcp.
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN || secrets.ONTOLD_MCP_TOKEN }}
+          ROOT_SECRET: ${{ secrets.ROOT_SECRET }}
+          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
+          NOTIFY_URL: ${{ vars.NOTIFY_URL }}
+        run: |
+          set -o pipefail
+          python3 scripts/mail_check.py --send | tee -a "$GITHUB_STEP_SUMMARY"

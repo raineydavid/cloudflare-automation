@@ -1,0 +1,193 @@
+# Make a reply to us reach a person.
+#
+# `hello@ontold.site` is the Reply-To on everything outbound. People
+# reply to no-reply addresses — that is not a user error, it is what
+# people do with email — and a buyer replying to a receipt is usually
+# asking something we would want to answer. With no routing rule they
+# get a bounce from an address that looks staffed, which is worse than
+# having offered no reply path at all.
+#
+# ## This is the OTHER email product
+#
+# Sending is what lets `no-reply@mail.<zone>` leave, and it is onboarded
+# somewhere else entirely (provision-sending-domain.yml). Routing is
+# what makes `hello@<zone>` arrive. Each can be perfect while the other
+# is missing, and confusing the two is most of why "it looks
+# configured" has been wrong here twice.
+#
+# ## Rules only, never destinations
+#
+# Cloudflare will not forward to an address until its owner clicks a
+# link it emails them, so verification cannot be automated and this does
+# not try. A rule pointing at an unverified address is accepted and
+# drops mail silently, which is the failure this is written to avoid —
+# so an unverified destination stops the run and gets named.
+#
+# It also refuses to CHOOSE a destination when there is more than one:
+# forwarding a domain's mail to an address nobody named is a guess whose
+# wrongness is invisible until somebody reports a reply that vanished.
+# Set the `MAIL_DESTINATION` repository variable to decide.
+#
+# ## One zone, or every zone
+#
+# By default this does the zone the Worker actually replies from. With
+# `{"scope":"account"}` in the request file it does every zone in the
+# Cloudflare account, because the failure it fixes is not specific to
+# one domain: a reply to `hello@<anything we own>` bounces unless a rule
+# exists, and the domains nobody is currently thinking about are exactly
+# the ones where that goes unnoticed. mail-estate.yml found 18 zones and
+# 17 of them with no reply path.
+#
+# Enabling is guarded per zone on that zone's own MX, so the estate-wide
+# form cannot displace an incumbent provider anywhere: a zone that
+# already receives mail is refused and reported, not touched.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/provision-email-routing.json
+#   echo '{"why":"...","scope":"account"}' > ...   # every zone
+
+name: provision-email-routing
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/provision-email-routing.json'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Create the missing rule (unticked = report only)'
+        type: boolean
+        default: false
+      scope:
+        description: 'account = every zone; zone = the reply zone only'
+        type: choice
+        options: [zone, account]
+        default: zone
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-email-routing
+  cancel-in-progress: false
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      # The zone and the local part both come from what the Worker
+      # actually replies as, so this cannot route an address nothing
+      # sends from. Same rule as the sending side: the address and its
+      # configuration are one decision.
+      - name: Which address do we ask people to reply to?
+        id: reply
+        run: |
+          set -euo pipefail
+          REPLY_TO=$(python3 -c 'from api._mail import HELLO; print(HELLO)')
+          echo "[reply] outbound mail says reply to $REPLY_TO"
+          echo "local=${REPLY_TO%@*}" >> "$GITHUB_OUTPUT"
+          echo "zone=${REPLY_TO#*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve account id
+        id: preflight
+        env:
+          RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      # One source for "which domains are there", shared with the report,
+      # so a domain cannot be provisioned and never reported or the
+      # reverse.
+      - name: Which zones
+        id: zones
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          REQ: .github/dispatch-requests/provision-email-routing.json
+          DISPATCH_SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          SCOPE="${DISPATCH_SCOPE:-zone}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            SCOPE=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("scope") or "zone"))' "$REQ")
+          fi
+          if [ "$SCOPE" = "account" ]; then
+            python3 scripts/mail_estate.py --names > /tmp/zones.txt
+          else
+            printf '%s\n' "${{ steps.reply.outputs.zone }}" > /tmp/zones.txt
+          fi
+          echo "[zones] scope=$SCOPE, $(wc -l < /tmp/zones.txt) zone(s)"
+          cat /tmp/zones.txt
+
+      - name: Report, and create the rule when asked
+        env:
+          # The purpose-scoped email credential when it exists, the
+          # deploy one otherwise. Preferring rather than replacing:
+          # CLOUDFLARE_API_TOKEN carries R2 and Workers Routes, which the
+          # email token deliberately does not, so these must never become
+          # the same secret.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          # Which inbox replies land in. A variable rather than a
+          # literal here: it is a real person's address, it changes
+          # without the code changing, and it should not be in a diff.
+          MAIL_DESTINATION: ${{ vars.MAIL_DESTINATION }}
+          ZONE: ${{ steps.reply.outputs.zone }}
+          LOCAL: ${{ steps.reply.outputs.local }}
+        run: |
+          # `set +e` deliberately, and it is the whole reason this loop
+          # works. GitHub runs steps under `bash -e`, so the first zone
+          # that returns non-zero ends the job — which it did: an
+          # estate-wide run reported on ONE zone, refused the second and
+          # never looked at the other sixteen. That is exactly the
+          # "one refusal hides the rest" failure this loop exists to
+          # avoid, and `set -o pipefail` alone does not prevent it.
+          set +e
+          set -o pipefail
+          # A push of the request file IS the ask; the form defaults to
+          # report-only so a manual run can look before it writes.
+          APPLY=1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.apply }}" != "true" ]; then
+            APPLY=0
+          fi
+          WORST=0
+          while read -r Z; do
+            [ -z "$Z" ] && continue
+            { echo ""; echo "### $Z"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$APPLY" = "0" ]; then
+              python3 scripts/email_routing.py "$Z" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              # --enable is guarded by the zone's own MX: it proceeds only
+              # when nothing receives for the domain, and refuses when
+              # anything does. The dangerous case is displacing an
+              # incumbent, and that is a fact about the zone rather than a
+              # judgement made here. That guard is what makes the
+              # estate-wide form safe to run at all.
+              python3 scripts/email_routing.py "$Z" --enable --ensure "$LOCAL" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            RC=$?
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            # Every zone is attempted. One refusal must not hide the
+            # state of the fifteen after it — the whole point of doing
+            # these together.
+            #
+            # 3 means "refused because another provider holds this
+            # domain's mail", which is the guard working rather than a
+            # failure. Counting it red made every estate run red, and a
+            # workflow that is always red is one nobody reads.
+            if [ "$RC" = "3" ]; then
+              echo "[skip] $Z is another provider's — left alone"
+            elif [ "$RC" -gt "$WORST" ]; then
+              WORST=$RC
+            fi
+          done < /tmp/zones.txt
+          exit $WORST

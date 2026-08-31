@@ -1,0 +1,5 @@
+{
+  "seedTemplates": true,
+  "reason": "Nonce 10: mechanics - seed the org scaffolds. Ensures site-template (exists) and creates app-template (README-only, the same pattern as site-template: the README is the contract describing the app shape, the generator pushes real files at creation). No stack or supplier names in the README - that lives in each generated app's package.json where it is unavoidable. No site repo touched.",
+  "nonce": 10
+}

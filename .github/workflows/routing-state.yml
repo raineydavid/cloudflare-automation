@@ -1,0 +1,57 @@
+# What Cloudflare Email Routing is doing for a zone, right now.
+#
+# Its own workflow rather than a step inside restore-inbound, because
+# the answer has to be READABLE: as a middle step its output sat three
+# steps up the log and could not be retrieved without pulling the whole
+# job. A diagnostic nobody can read is not a diagnostic.
+#
+# Read-only. It applies nothing, and it is the first thing to run when
+# somebody says mail has stopped: "no rule" and "rule to an unverified
+# destination" both deliver nothing and look identical from outside,
+# and they are fixed completely differently.
+#
+#   echo '{"zone":"ontold.com"}' \
+#     > .github/dispatch-requests/routing-state.json
+
+name: routing-state
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/routing-state.json'
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: 'Zone to read'
+        required: true
+        default: 'ontold.com'
+
+permissions:
+  contents: read
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Read it
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          ZONE: ${{ inputs.zone || 'ontold.com' }}
+        run: |
+          set -o pipefail
+          {
+            echo "### routing state"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/routing_state.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          RC=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

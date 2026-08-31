@@ -1,0 +1,165 @@
+name: Provision R2 buckets
+
+# Create Ontold's R2 bucket(s) from GitHub Actions — the founder's
+# pattern ("we normally run things via github yml"). Runs in the
+# Actions runner where the Cloudflare/R2 secrets already live, so it
+# needs no credentials in any local/agent environment.
+#
+# Auth reuses the SAME R2 S3 credentials seed-r2.yml already uses
+# (R2's S3 API supports CreateBucket), so no new secret is required —
+# provided the R2 API token has "Admin Read & Write" scope (an
+# object-only token can read/write but not create buckets; the step
+# will say so). Optional public-access enable uses a Cloudflare API
+# token if one is configured.
+#
+# Trigger: Actions tab → this workflow → Run workflow. Only repo
+# collaborators (write access) can dispatch it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: 'Shared bucket name'
+        default: 'ontold-projects-prod'
+        required: true
+      jurisdiction:
+        description: 'Data residency: "eu" for EU-only, else leave blank'
+        default: ''
+        required: false
+      tenants:
+        description: 'Optional comma-separated paid-tenant suffixes → creates ontold-<suffix> each'
+        default: ''
+        required: false
+      enable_public:
+        description: 'Enable the bucket public r2.dev URL (needs CLOUDFLARE_API_TOKEN secret)'
+        type: boolean
+        default: false
+  # Also run on push to this branch when THIS file changes — the only
+  # way to execute it before it reaches the default branch (where
+  # workflow_dispatch would appear in the UI). Same-repo branch, so the
+  # repo secrets are available. Idempotent: an existing bucket is fine.
+  # On a push run there are no inputs, so the steps fall back to the
+  # default bucket + best-effort public-access enable.
+  push:
+    branches: ['claude/mvp-launch-planning-moh4d5']
+    paths: ['.github/workflows/provision-r2.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-r2
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    env:
+      # Same fallbacks as seed-r2.yml — R2 S3 keys used with aws-cli.
+      AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN:          ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      JUR:                   ${{ inputs.jurisdiction }}
+    steps:
+      - name: Validate credentials
+        # Re-fire after the founder re-pasted the real S3 keys
+        # (2026-07-12: id=32 Access Key ID, secret=64 Secret Access Key,
+        # dropping the CF "Token value" that had been in the secret field).
+        run: |
+          echo "resolved: id=$([ -n "${AWS_ACCESS_KEY_ID:-}" ] && echo yes || echo NO) secret=$([ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && echo yes || echo NO) account=$([ -n "${R2_ACCOUNT_ID:-}" ] && echo yes || echo NO)"
+          # Lengths only (not values — a length is not a secret). Healthy
+          # R2 S3 creds: id=32, secret=64, account=32. id=64 means the
+          # SECRET is in the ID field.
+          echo "lengths:  id=${#AWS_ACCESS_KEY_ID} secret=${#AWS_SECRET_ACCESS_KEY} account=${#R2_ACCOUNT_ID}   (want id=32 secret=64 account=32)"
+          if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "::error::Missing R2 credentials. Set R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (Admin Read & Write scope, so CreateBucket is allowed) and R2_ACCOUNT_ID as repo secrets — or their CLOUDFLARE_* equivalents."
+            exit 1
+          fi
+
+      - name: Create bucket(s)
+        run: |
+          set -euo pipefail
+          # Extract the 32-hex account id + mask it — the SAME account-id
+          # handling every R2 lane uses (founder: "they should all work the
+          # same way"). R2 is this workflow's whole point, so a value with
+          # no 32-hex is a hard, named failure, not a skip.
+          R2_ACCOUNT_ID=$(printf '%s' "$R2_ACCOUNT_ID" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$R2_ACCOUNT_ID" ]; then
+            echo "::error::R2_ACCOUNT_ID has no 32-hex Cloudflare account id — fix the secret."
+            exit 1
+          fi
+          echo "::add-mask::$R2_ACCOUNT_ID"
+          # Jurisdiction-restricted buckets live on a jurisdiction host
+          # (matches api/_inference/r2_sink._r2_endpoint). Blank = standard.
+          HOST="${R2_ACCOUNT_ID}${JUR:+.${JUR}}.r2.cloudflarestorage.com"
+          ENDPOINT="https://${HOST}"
+          echo "Endpoint: ${ENDPOINT}"
+
+          create() {
+            local name="$1"
+            echo "→ creating ${name}"
+            if aws s3api create-bucket --bucket "${name}" --endpoint-url "${ENDPOINT}" --region auto 2>/tmp/err; then
+              echo "::notice::created bucket ${name}"
+            elif grep -qiE "BucketAlreadyOwnedByYou|already exists|BucketAlreadyExists" /tmp/err; then
+              echo "::notice::${name} already exists — ok"
+            else
+              echo "::error::could not create ${name}:"; cat /tmp/err
+              echo "::error::If this is AccessDenied, the R2 token lacks bucket-admin scope — recreate it as 'Admin Read & Write'."
+              exit 1
+            fi
+          }
+
+          BUCKET="${{ inputs.bucket }}"; BUCKET="${BUCKET:-ontold-projects-prod}"
+          create "${BUCKET}"
+
+          # The public-derivatives bucket (watermarked share cards /
+          # low-res thumbs ONLY — originals never land here; see
+          # api/_inference/r2_sink.upload_public_derivative). This is
+          # the only bucket that ever gets a public URL.
+          create "ontold-public"
+
+          IFS=',' read -ra TS <<< "${{ inputs.tenants }}"
+          for t in "${TS[@]}"; do
+            t="$(echo "$t" | xargs)"
+            [ -n "$t" ] && create "ontold-${t}"
+          done
+
+          echo "Buckets now on the account:"
+          aws s3 ls --endpoint-url "${ENDPOINT}" || true
+
+      - name: Enable public access (best-effort)
+        # HARD-SCOPED to ontold-public. Public access on R2 is per-
+        # bucket all-or-nothing; the projects bucket holds paywalled +
+        # private objects served ONLY via short-TTL signed URLs
+        # (api/watch.py), so it must NEVER get a public URL. This step
+        # therefore ignores inputs.bucket entirely.
+        run: |
+          set -euo pipefail
+          BUCKET="ontold-public"
+          case "${BUCKET}" in *-public) ;; *)
+            echo "::error::refusing to enable public access on non-public bucket '${BUCKET}'"; exit 1;;
+          esac
+          if [ -z "${CF_API_TOKEN:-}" ]; then
+            echo "::warning::No CLOUDFLARE_API_TOKEN secret — enable the public r2.dev URL (or attach a custom domain like media.ontold.com) in the dashboard: R2 → ${BUCKET} → Settings."
+            exit 0
+          fi
+          JUR_HEADER=()
+          [ -n "${JUR:-}" ] && JUR_HEADER=(-H "cf-r2-jurisdiction: ${JUR}")
+          RESP="$(curl -sS -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${R2_ACCOUNT_ID}/r2/buckets/${BUCKET}/domains/managed" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${JUR_HEADER[@]}" \
+            --data '{"enabled":true}')"
+          echo "${RESP}"
+          if echo "${RESP}" | grep -q '"success":true'; then
+            DOMAIN="$(echo "${RESP}" | sed -nE 's/.*"domain":"([^"]+)".*/\1/p')"
+            echo "::notice::public URL enabled: https://${DOMAIN}  — set this as R2_PUBLIC_BASE."
+          else
+            echo "::warning::could not auto-enable public access; do it in the dashboard."
+          fi
+
+      - name: Next steps
+        run: |
+          echo "::notice::Bucket(s) provisioned. Remaining: (1) confirm/enable public access or a custom domain; (2) put R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID/SECRET, R2_PUBLIC_BASE (and R2_JURISDICTION if EU) into Vercel env; (3) run seed-r2.yml to mirror media. Then the storage lane is live."

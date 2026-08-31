@@ -1,0 +1,145 @@
+name: Seed assets to Cloudflare R2
+
+# One-shot + on-change uploader for the bundled seed assets that
+# ship in /api/seed/ — Date Night film + thumb, Lighthouse Keeper
+# film + thumb + VTT, AI-GENTICS images, and anything else added to
+# the seed directory later. /public was retired: nothing in the
+# repo ships under /public any more.
+#
+# The pattern mirrors import.yml's R2 upload step (aws-cli is
+# preinstalled on ubuntu-latest, R2 speaks the S3 API). Same
+# secret fallback chain so no new secrets are required.
+#
+# Triggers:
+#   - workflow_dispatch — manual button in the Actions tab.
+#   - push on ANY branch when /api/seed/** changes — same pattern as
+#     generate-examples.yml (the agent path: the GitHub MCP token gets
+#     403 on actions_run_trigger, so editing/adding seed files + pushing
+#     IS the dispatch). Previously scoped to `branches: [main]`, which
+#     meant it silently never fired for any feature-branch work — R2
+#     was never actually populated despite months of seed additions,
+#     and a later bundle-size fix that assumed R2 was live broke local
+#     media serving with no working fallback under it. Un-scoping this
+#     is what makes that assumption true going forward.
+#
+# What it does:
+#   1. Sync api/seed/* → s3://<bucket>/assets/* with `aws s3
+#      sync` (delete=false — we add, never destroy).
+#   2. R2 keys mirror the seed paths EXACTLY (api/seed/<x> →
+#      assets/<x>), so /api/watch.py's manifest lookup just
+#      passes the key straight to the S3 client.
+#   3. Skips cleanly when R2 secrets aren't set (local-dev /
+#      preview environments without R2).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'api/seed/**'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Sync api/seed to R2
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          # R2_BUCKET only exists as a 'preview' environment secret,
+          # which this job doesn't (and shouldn't) declare — the name
+          # is public knowledge from the provision-r2 run logs.
+          R2_BUCKET:             ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+        run: |
+          # pipefail matters: `aws ... | tee` reports tee's exit code
+          # without it, and run 4 stayed green over an aws [ERROR].
+          set -eo pipefail
+          # FAIL, don't skip. This step spent months green while
+          # uploading nothing (missing secrets → warning + exit 0), and
+          # the app's bundled-image fallback hid it: images worked,
+          # every un-bundled video 404'd (founder, 2026-07-17: "fix non
+          # silent failures"). A red run is the log.
+          if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "::error::R2 credentials missing at REPO level (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY). The seed set was NOT mirrored — videos that aren't already in R2 will not play. Add the repo-level secrets (environment secrets are invisible to this job)."
+            echo "### Seed sync FAILED — R2 credentials missing at repo level" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # The account id is exactly 32 hex chars; the secret holds
+          # whatever was pasted (2026-07-17: a 33-char value broke the
+          # endpoint as 'Invalid endpoint'). Extract the 32-hex token.
+          R2_ACCOUNT_ID=$(printf '%s' "$R2_ACCOUNT_ID" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$R2_ACCOUNT_ID" ]; then
+            echo "::error::R2_ACCOUNT_ID contains no 32-hex Cloudflare account id — fix the repo secret."
+            echo "### Seed sync FAILED — R2_ACCOUNT_ID is not a valid account id" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # A regex-extracted substring isn't the literal secret value
+          # GitHub's masking was told about, so it prints in the clear
+          # unless taught explicitly — see generate-dramax-ep.yml.
+          echo "::add-mask::$R2_ACCOUNT_ID"
+          if [ ! -d api/seed ]; then
+            echo "::notice::api/seed/ does not exist — nothing to seed."
+            exit 0
+          fi
+
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # --delete intentionally OMITTED. The seed is a write-only
+          # source of truth; user-generated R2 keys (films/, thumbs/,
+          # etc.) live under different prefixes and must not be touched
+          # by a seed-sync.
+
+          # /api/seed — every binary asset (films + captions, free
+          # public-remix images, thumbnails, manifest). Lives under
+          # /api/ because that's the only path Vercel treats as
+          # unambiguously server-side: nothing inside /api/ is
+          # HTTP-served unless it's a .py function file, and the
+          # contents get bundled with the function deploy so
+          # api/watch.py can read manifest.json at runtime.
+          #
+          # The SPA reaches the binary assets via watchUrl(id, kind)
+          # → /api/watch?id=<id>[&kind=...], which reads `kind` and
+          # `key`/`thumbnail`/`captions` off api/seed/manifest.json
+          # to pick the right R2 key + TTL + cache headers.
+          #
+          # Sync excludes manifest.json + README.md — the manifest
+          # only needs to live with the function code, never on R2.
+          aws s3 sync api/seed "s3://${R2_BUCKET}/assets" \
+            --endpoint-url "$ENDPOINT" \
+            --no-progress \
+            --size-only \
+            --exclude 'manifest.json' \
+            --exclude '*/README.md' \
+            --exclude 'README.md' | tee /tmp/sync.log
+
+          echo "::notice::Seed upload complete → s3://${R2_BUCKET}/assets/"
+          # `grep` exits 1 when it matches NOTHING, and the step runs
+          # under `bash -e`. A sync that uploaded zero objects — the
+          # normal result of a commit that only DELETES a seed file —
+          # therefore failed a job whose own log had just said
+          # "upload complete". The count line was already guarded; the
+          # listing line was not. Both are guarded now.
+          {
+            echo "### Seed sync → s3://${R2_BUCKET}/assets/"
+            uploaded=$(grep -c '^upload:' /tmp/sync.log || true)
+            echo "- ${uploaded} object(s) uploaded this run"
+            grep '^upload:' /tmp/sync.log | head -40 | sed 's/^/- /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Manifest sanity (print what's now in R2)
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+        run: |
+          if [ -z "${R2_BUCKET:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then exit 0; fi
+          R2_ACCOUNT_ID=$(printf '%s' "$R2_ACCOUNT_ID" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          [ -z "$R2_ACCOUNT_ID" ] && exit 0
+          echo "::add-mask::$R2_ACCOUNT_ID"
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          echo "Top of s3://${R2_BUCKET}/assets/:"
+          aws s3 ls "s3://${R2_BUCKET}/assets/" --recursive --endpoint-url "$ENDPOINT" | head -50 || true

@@ -1,0 +1,6 @@
+{
+  "domain": "lorrybus.com",
+  "slug": "lorrybus",
+  "reason": "Founder said yes to the custom-domain lane; lorrybus.com is the site it was asked for (task: serve custom hostnames so lorrybus.com works). This first run also creates the one-time zone plumbing (fallback record + fallback origin).",
+  "nonce": 1
+}

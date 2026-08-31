@@ -1,0 +1,136 @@
+# Take our films back off the public bucket.
+#
+# Founder: *"thats not what we want to expose to users, they should
+# only ever see ontold.com"*. An earlier version of this workflow put
+# them there, so this one takes them down.
+#
+# The rule it broke is worth stating plainly. ontold serves media
+# through /api/watch: the manifest holds the R2 key and an access
+# level, api/_entitlement decides (and fails closed on anything it
+# does not recognise), and only then is a 5-minute signed URL minted
+# and 302'd to. The key never reaches the network tab, the bucket is
+# unreadable without a signature, and a leaked URL is stale in five
+# minutes. A permanent `pub-….r2.dev` address carrying `immutable,
+# max-age=31536000` is the opposite of all four.
+#
+# The reasons the artefacts were hard to see are still true — the
+# takes are deploy-excluded, the showcase copy needs a deploy that has
+# the manifest row, and an Actions artifact is a zip behind a login —
+# and none of them is fixed by publishing to a hostname that is not
+# ours.
+#
+#   echo '{"slug":"suite-dreams"}' > .github/dispatch-requests/unhost-brief-films.json
+#
+# The dispatch-request path exists because an agent session's token gets
+# 403 on workflow_dispatch; pushing the file IS the button.
+
+name: unhost-brief-films
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: 'Brief slug — names api/_briefs/<slug>.json'
+        required: true
+        default: 'suite-dreams'
+  push:
+    paths:
+      - '.github/dispatch-requests/unhost-brief-films.json'
+
+permissions:
+  contents: write               # the index deletion is committed back
+
+concurrency:
+  group: unhost-brief-films
+  cancel-in-progress: false
+
+jobs:
+  unhost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      R2_BUCKET: ontold-public
+      R2_PUBLIC_BASE_RAW: ${{ secrets.R2_PUBLIC_BASE || secrets.R2_PUBLIC_URL || secrets.CLOUDFLARE_R2_PUBLIC_URL }}
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_JURISDICTION: ${{ secrets.R2_JURISDICTION }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Which brief
+        id: req
+        run: |
+          set -euo pipefail
+          SLUG='${{ inputs.slug }}'
+          REQ=.github/dispatch-requests/unhost-brief-films.json
+          if [ -z "$SLUG" ] && [ -f "$REQ" ]; then
+            SLUG=$(node -e 'const d=require("fs").readFileSync(process.argv[1],"utf8");process.stdout.write((JSON.parse(d).slug||"").trim())' "$REQ")
+          fi
+          [ -z "$SLUG" ] && SLUG=suite-dreams
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "### Removing the public copies for \`$SLUG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Take them down
+        run: |
+          set -euo pipefail
+          for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::${v} is missing, so nothing can be removed."
+              exit 1
+            fi
+          done
+
+          ACC=$(printf '%s' "${R2_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -z "$ACC" ] && { echo "::error::no 32-character account id inside R2_ACCOUNT_ID"; exit 1; }
+          echo "::add-mask::$ACC"
+
+          # R2_PUBLIC_BASE has historically held the S3 API endpoint,
+          # which answers 400 to an unauthenticated GET — objects under
+          # it are unreadable by a browser. Ask Cloudflare for the
+          # bucket's managed domain rather than trusting the secret.
+          BASE=""
+          case "${R2_PUBLIC_BASE_RAW:-}" in
+            *r2.cloudflarestorage.com*|"") : ;;
+            *) BASE="${R2_PUBLIC_BASE_RAW%/}" ;;
+          esac
+          if [ -z "$BASE" ]; then
+            [ -z "${CF_API_TOKEN:-}" ] && { echo "::error::no public domain configured and no CLOUDFLARE_API_TOKEN to resolve one."; exit 1; }
+            JUR=()
+            [ -n "${R2_JURISDICTION:-}" ] && JUR=(-H "cf-r2-jurisdiction: ${R2_JURISDICTION}")
+            API="https://api.cloudflare.com/client/v4/accounts/${ACC}/r2/buckets/${R2_BUCKET}/domains/managed"
+            RESP=$(curl -sS -X PUT "$API" -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" "${JUR[@]}" --data '{"enabled":true}' || true)
+            DOMAIN=$(printf '%s' "$RESP" | sed -nE 's/.*"domain":"([^"]+)".*/\1/p' | head -1)
+            [ -z "$DOMAIN" ] && { echo "::error::could not resolve a public domain for ${R2_BUCKET}: $(printf '%s' "$RESP" | head -c 300)"; exit 1; }
+            BASE="https://${DOMAIN}"
+          fi
+          export R2_PUBLIC_BASE="$BASE"
+          export R2_ACCOUNT_ID="$ACC"
+          export HOST_SLUG='${{ steps.req.outputs.slug }}'
+          echo "::notice::serving from ${BASE}"
+
+          set -o pipefail
+          node scripts/unhost_brief_films.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The index of public addresses is deleted by the script; the
+      # deletion is committed so the map back to the mistake goes too.
+      - name: Commit the removal
+        if: always()
+        run: |
+          set -euo pipefail
+          IDX="api/_briefs/_sources/${{ steps.req.outputs.slug }}-films.json"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A "$IDX" || true
+          if git diff --cached --quiet; then
+            echo "index already gone"
+          else
+            git commit -m "unhost-brief-films: ${{ steps.req.outputs.slug }} (run ${{ github.run_id }})"
+            bash scripts/git_push_retry.sh
+          fi

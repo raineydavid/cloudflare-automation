@@ -1,0 +1,7 @@
+# The Cloudflare automation scripts are deliberately stdlib-only: they
+# talk to api.cloudflare.com over urllib so a workflow runner needs no
+# install step and no supply chain. Nothing is required here to run
+# scripts/*.py.
+#
+# pytest is the only addition, and only to run the tests.
+pytest>=8.0.0

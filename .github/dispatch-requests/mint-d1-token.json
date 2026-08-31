@@ -1,0 +1,4 @@
+{
+  "reason": "Founder: 'can you create this for me on cloudflare please for expert-station? its dedicated conversation doesnt have CF loaded.' Mint a CLOUDFLARE_API_TOKEN with exactly Account -> D1 -> Edit and NO expiry (a TTL means writes 403 at 3am, d1SetJson returns false, and the app silently drops to warm memory). Verify it, store it as a repo secret on expert-station via the GitHub App, and revoke it if it cannot be stored.",
+  "nonce": 1
+}

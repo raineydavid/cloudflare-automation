@@ -1,0 +1,741 @@
+{
+  "_": "Generated from api/_consent.may_contact. See shared/README.md.",
+  "cases": [
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": true,
+        "why": "permitted"
+      },
+      "name": "plain permitted"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": true,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "the recipient asked us to stop"
+      },
+      "name": "recipient said stop"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 99,
+        "local_hour": 3,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": true,
+        "revoked": true
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "the recipient asked us to stop"
+      },
+      "name": "stop beats everything else"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": true
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "this consent was withdrawn"
+      },
+      "name": "guardian revoked"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2028-01-01T00:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": true
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "this consent was withdrawn"
+      },
+      "name": "revoked beats expiry"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2028-01-01T00:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "consent has expired \u2014 ask again"
+      },
+      "name": "expired"
+    },
+    {
+      "args": {
+        "channel": "sms",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "a text message was not agreed to"
+      },
+      "name": "channel not agreed"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "reminder",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "'reminder' is not a purpose this consent covers"
+      },
+      "name": "purpose not agreed"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 7,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "outside waking hours (9:00-20:00 where they are)"
+      },
+      "name": "before waking hours"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 21,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "outside waking hours (9:00-20:00 where they are)"
+      },
+      "name": "after waking hours"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 9,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": true,
+        "why": "permitted"
+      },
+      "name": "first waking hour is in"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 20,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "outside waking hours (9:00-20:00 where they are)"
+      },
+      "name": "closing hour is out"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 2,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "already contacted 2 times today (limit 2)"
+      },
+      "name": "at the ceiling"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 1,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": true,
+        "why": "permitted"
+      },
+      "name": "one under the ceiling"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "consent",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": null
+      },
+      "expect": {
+        "allowed": false,
+        "why": "consent is unsigned"
+      },
+      "name": "unsigned"
+    },
+    {
+      "args": {
+        "channel": "voice",
+        "contacts_today": 0,
+        "local_hour": 10,
+        "now_iso": "2026-08-06T10:00:00Z",
+        "purpose": "companionship",
+        "recipient_said_stop": false,
+        "revoked": false
+      },
+      "consent": {
+        "digest": "d",
+        "public_key": "gk",
+        "record": {
+          "channels": [
+            "voice",
+            "whatsapp"
+          ],
+          "expires_at": "2027-01-01T00:00:00Z",
+          "guardian": "gk",
+          "id": "consent-6426be9b69ba8f45",
+          "kind": "something-else",
+          "max_contacts_per_day": 2,
+          "needs": [
+            "reintroduce",
+            "slow-speech"
+          ],
+          "purposes": [
+            "companionship",
+            "reading"
+          ],
+          "recipient_ref": "ref-1",
+          "relationship": "son",
+          "waking_hours": [
+            9,
+            20
+          ]
+        },
+        "signature": "sig"
+      },
+      "expect": {
+        "allowed": false,
+        "why": "not a consent record"
+      },
+      "name": "not a consent record"
+    }
+  ]
+}

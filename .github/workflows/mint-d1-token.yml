@@ -1,0 +1,134 @@
+# Mint the expert-station D1 runtime token.
+#
+# Founder: "can you create this for me on cloudflare please for
+# expert-station?" — a CLOUDFLARE_API_TOKEN whose only power is
+# Account → D1 → Edit, with NO expiry (a TTL means every write 403s
+# at 3am, d1SetJson returns false, and the app silently drops to warm
+# memory; expert-station's verify-launch warns on expiring tokens for
+# exactly that reason).
+#
+# The contract for minted credentials:
+#   - the value is masked the moment it exists and is NEVER printed;
+#   - it is stored as a repo secret on expert-station (its own repo)
+#     via the GitHub App, so its workflows and sessions can use it;
+#   - if it cannot be stored anywhere, it is REVOKED before this job
+#     fails — a credential that exists only in a log is a leak, and a
+#     credential nobody holds is litter.
+#
+# Ask for a run by committing .github/dispatch-requests/mint-d1-token.json.
+name: mint-d1-token
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/mint-d1-token.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      ACCOUNT_RAW: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      TOKEN_NAME: expert-station-d1
+      SECRET_NAME: CLOUDFLARE_API_TOKEN
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Mint, verify, store (or revoke)
+        run: |
+          set -euo pipefail
+          TOK=$(printf '%s' "${CF_TOKEN:-}" | tr -d '[:space:]')
+          ACC=$(printf '%s' "${ACCOUNT_RAW:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -n "$TOK" ] && echo "::add-mask::$TOK"
+          [ -n "$ACC" ] && echo "::add-mask::$ACC"
+          [ -z "$TOK" ] && { echo "::error::CLOUDFLARE_API_TOKEN secret missing"; exit 1; }
+          [ -z "$ACC" ] && { echo "::error::no Cloudflare account id in secrets"; exit 1; }
+
+          # 1. The 'D1 Write' permission group id — asked of the API,
+          #    never hardcoded (group ids differ per endpoint family).
+          PICK_PG='import sys,json; rs=(json.load(sys.stdin).get("result") or []); m=[g.get("id") for g in rs if g.get("name")=="D1 Write"]; print(m[0] if m else "")'
+          PG=''
+          for URL in \
+            "https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens/permission_groups" \
+            "https://api.cloudflare.com/client/v4/user/tokens/permission_groups"; do
+            PG=$(curl -sS --max-time 20 "$URL" -H "Authorization: Bearer $TOK" | python3 -c "$PICK_PG" 2>/dev/null) || PG=''
+            [ -n "$PG" ] && break
+          done
+          [ -z "$PG" ] && { echo "::error::cannot read token permission groups - the existing CLOUDFLARE_API_TOKEN lacks token-management rights. Smallest fix: edit that token in the dashboard and add Account -> Account API Tokens -> Edit (editing preserves its value, no GitHub secret changes), then re-run. Or create by hand: Custom token, Account -> D1 -> Edit, no TTL."; exit 1; }
+          echo "[mint] D1 Write permission group resolved"
+
+          # 2. Create the token: account-owned first (survives people),
+          #    user-owned as fallback. No expires_on = no TTL, by design.
+          BODY=$(python3 -c "import json; print(json.dumps({'name':'${TOKEN_NAME}','policies':[{'effect':'allow','resources':{'com.cloudflare.api.account.${ACC}':'*'},'permission_groups':[{'id':'${PG}'}]}]}))")
+          VALUE=''; TID=''; OWNED=''
+          for KIND in account user; do
+            if [ "$KIND" = account ]; then URL="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens"; else URL="https://api.cloudflare.com/client/v4/user/tokens"; fi
+            RESP=$(curl -sS --max-time 20 -X POST "$URL" -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' --data "$BODY")
+            OK=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print("1" if json.load(sys.stdin).get("success") else "")' 2>/dev/null || echo '')
+            if [ -n "$OK" ]; then
+              VALUE=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["value"])')
+              TID=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["id"])')
+              OWNED="$KIND"
+              break
+            fi
+            CODE=$(printf '%s' "$RESP" | python3 -c 'import sys,json; es=(json.load(sys.stdin).get("errors") or [{}]); print(str(es[0].get("code"))+": "+str(es[0].get("message")))' 2>/dev/null || echo '?')
+            echo "[mint] ${KIND}-owned create refused (${CODE})"
+          done
+          if [ -z "$VALUE" ]; then
+            echo "::error::Cloudflare refused to mint from this credential. Smallest fix: edit the existing CLOUDFLARE_API_TOKEN in the dashboard and add Account -> Account API Tokens -> Edit, then re-run this workflow. (Or create the token by hand: Custom token, Account -> D1 -> Edit, no TTL.)"
+            exit 1
+          fi
+          echo "::add-mask::$VALUE"
+          echo "::add-mask::$TID"
+          echo "[mint] created ${OWNED}-owned token '${TOKEN_NAME}'"
+
+          revoke() {
+            if [ "$OWNED" = account ]; then U="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens/${TID}"; else U="https://api.cloudflare.com/client/v4/user/tokens/${TID}"; fi
+            curl -sS -X DELETE "$U" -H "Authorization: Bearer $TOK" >/dev/null 2>&1 || true
+            echo "[mint] revoked the minted token - it is stored nowhere, so it must not exist"
+          }
+
+          # 3. Verify what was minted: valid, D1-capable, and no expiry.
+          V=$(curl -sS --max-time 20 https://api.cloudflare.com/client/v4/user/tokens/verify -H "Authorization: Bearer $VALUE")
+          if ! printf '%s' "$V" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("success"), "minted token does not verify"; exp=(d.get("result") or {}).get("expires_on"); assert not exp, "minted token has an expiry - founder said NO TTL"; print("[mint] verifies, no expiry")'; then
+            revoke; exit 1
+          fi
+          D1=$(curl -sS --max-time 20 "https://api.cloudflare.com/client/v4/accounts/${ACC}/d1/database" -H "Authorization: Bearer $VALUE" | python3 -c 'import sys,json; print("yes" if json.load(sys.stdin).get("success") else "no")' 2>/dev/null || echo no)
+          echo "[mint] can list D1 databases: $D1"
+          if [ "$D1" = no ]; then echo "::error::minted token cannot reach D1"; revoke; exit 1; fi
+
+          # 4. Hand it to expert-station — a separate repo — as a repo
+          #    secret, via the GitHub App. Nothing prints.
+          STORED=''
+          for ORG in ontolddotcom raineydavid; do
+            APP=$(GITHUB_ORG="$ORG" node scripts/mint_app_token.mjs 2>/dev/null || true)
+            if [ -z "$APP" ]; then echo "[store] no app token for $ORG"; continue; fi
+            echo "::add-mask::$APP"
+            if GH_TOKEN="$APP" gh api "repos/${ORG}/expert-station" --jq .full_name >/dev/null 2>&1; then
+              if GH_TOKEN="$APP" gh secret set "$SECRET_NAME" --repo "${ORG}/expert-station" --body "$VALUE" 2>/tmp/gherr; then
+                echo "[store] secret ${SECRET_NAME} set on ${ORG}/expert-station"
+                STORED="${ORG}/expert-station"
+                break
+              fi
+              echo "[store] ${ORG}/expert-station exists but secret write failed: $(head -c 200 /tmp/gherr)"
+            else
+              echo "[store] no ${ORG}/expert-station visible to the app"
+            fi
+          done
+          if [ -z "$STORED" ]; then
+            echo "::error::minted a healthy D1 token but could not store it anywhere - revoking it. Fix the storage path (which owner holds expert-station, and does the GitHub App have Secrets write there?) and re-run."
+            revoke
+            exit 1
+          fi
+          echo "::notice::expert-station D1 token minted (Account -> D1 -> Edit, no expiry) and stored as ${SECRET_NAME} on ${STORED}. If the app's runtime is a host that reads env vars, copy it from the repo secret into that host's env - this job cannot see that host."

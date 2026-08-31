@@ -1,0 +1,21 @@
+# Repositories mint-deploy-token.yml may write a Cloudflare credential into.
+#
+# One owner/name per line. Blank lines and #comments are ignored.
+#
+# This is a file rather than a dashboard variable on purpose: who may
+# receive a live credential is exactly the kind of change that should
+# appear in a diff and have a reviewer. A variable changes with no trace.
+#
+# Absent or empty means NOBODY. The workflow fails closed — an open
+# default fails silently and totally, a closed one fails once, clearly,
+# the first time somebody uses it.
+#
+# The allowlist is the second lock. The first is the GitHub App
+# installation: the run fails unless the app can see the target and write
+# its secrets, so a repository nobody installed the app on cannot be
+# provisioned however this file reads. This stops a request file in THIS
+# tree from redirecting a credential to another repo the app also reaches.
+
+raineydavid/nationalff
+raineydavid/screening
+raineydavid/ontold

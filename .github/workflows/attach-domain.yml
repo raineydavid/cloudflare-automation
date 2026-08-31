@@ -1,0 +1,222 @@
+# Attach a domain to a published site — the lane that makes
+# lorrybus.com serve the lorrybus site.
+#
+# TWO PATHS, picked automatically:
+#
+# OWN ZONE (free, no card): the domain is a zone in our Cloudflare
+#   account (founder: "for our own domains we can just move them over
+#   to cloudflare surely? we dont need to pay"). One run creates the
+#   proxied originless records (apex + www), adds worker routes on
+#   that zone, and writes the mappings. Live the moment the zone is
+#   Active on our nameservers; Cloudflare's own cert covers it.
+#
+# CUSTOMER DOMAIN (Cloudflare for SaaS; first 100 hostnames free but
+#   the zone must have Custom Hostnames enabled): ensures the SaaS
+#   plumbing once per zone (originless fallback record, fallback
+#   origin, the */* route), registers the hostname (per-hostname TLS
+#   via HTTP validation), writes the mapping, and reports the exact
+#   DNS records the DOMAIN OWNER must set — the one step that is
+#   theirs alone. Needs Zone → SSL and Certificates → Edit on the
+#   token; a missing grant fails with that exact ask.
+#
+# Ask for a run by committing .github/dispatch-requests/attach-domain.json
+# with {"domain": "...", "slug": "...", "nonce": N}.
+name: attach-domain
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/attach-domain.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      ACCOUNT_RAW: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+      ZONE_NAME: ontold.site
+      FALLBACK_HOST: fallback.ontold.site
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Register hostname, wire fallback, write mapping
+        run: |
+          set -euo pipefail
+          API='https://api.cloudflare.com/client/v4'
+          TOK=$(printf '%s' "${CF_TOKEN:-}" | tr -d '[:space:]')
+          [ -n "$TOK" ] && echo "::add-mask::$TOK"
+          [ -z "$TOK" ] && { echo "::error::CLOUDFLARE_API_TOKEN secret missing"; exit 1; }
+          [ -z "${PUBLISH_TOKEN:-}" ] && { echo "::error::PUBLISH_TOKEN secret missing"; exit 1; }
+
+          f='.github/dispatch-requests/attach-domain.json'
+          DOMAIN=$(jq -r '.domain // empty' "$f" | tr 'A-Z' 'a-z')
+          SLUG=$(jq -r '.slug // empty' "$f")
+          echo "request: $DOMAIN -> $SLUG ($(jq -r '.reason // "(no reason)"' "$f" | head -c 200))"
+          printf '%s' "$DOMAIN" | grep -qE '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' \
+            || { echo "::error::'$DOMAIN' is not a hostname"; exit 1; }
+          case "$DOMAIN" in *.ontold.site|ontold.site) echo "::error::our own suffix never needs attaching"; exit 1;; esac
+          printf '%s' "$SLUG" | grep -qE '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' \
+            || { echo "::error::'$SLUG' is not a slug"; exit 1; }
+
+          ok() { python3 -c 'import sys,json; d=json.load(sys.stdin); print("1" if d.get("success") else "")'; }
+          err() { python3 -c 'import sys,json; es=(json.load(sys.stdin).get("errors") or [{}]); print(str(es[0].get("code"))+": "+str(es[0].get("message")))'; }
+          zone_id() { curl -sS --max-time 20 "$API/zones?name=$1" -H "Authorization: Bearer $TOK" \
+            | python3 -c 'import sys,json; rs=(json.load(sys.stdin).get("result") or [{}]); print(rs[0].get("id") or "")'; }
+
+          # ── OWN-ZONE PATH ──────────────────────────────────────────
+          # Founder: "for our own domains we can just move them over to
+          # cloudflare surely? we dont need to pay." Right: a domain
+          # that is a zone IN OUR ACCOUNT needs no Cloudflare for SaaS,
+          # no fallback origin and no payment method — just a proxied
+          # originless record, worker routes on its own zone, and the
+          # mapping. All within permissions the token already holds
+          # (provided its Zone Resources cover this zone).
+          OWN=$(zone_id "$DOMAIN")
+          if [ -n "$OWN" ]; then
+            echo "::add-mask::$OWN"
+            echo "[zone] ${DOMAIN} is OUR OWN zone - no SaaS needed, no cost"
+            ensure_dns() { # type name content
+              H=$(curl -sS --max-time 20 "$API/zones/$OWN/dns_records?name=$2&type=$1" -H "Authorization: Bearer $TOK" \
+                | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("result") or []))')
+              [ "$H" != 0 ] && { echo "[dns] $2 ($1) already exists"; return 0; }
+              R=$(curl -sS --max-time 20 -X POST "$API/zones/$OWN/dns_records" \
+                -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                --data "{\"type\":\"$1\",\"name\":\"$2\",\"content\":\"$3\",\"proxied\":true}")
+              [ -n "$(printf '%s' "$R" | ok)" ] && echo "[dns] created $2 $1 $3 (proxied)" \
+                || { echo "::error::could not create $2 ($(printf '%s' "$R" | err)) - if this is a permission error, the token's Zone Resources must include ${DOMAIN} (or All zones)"; exit 1; }
+            }
+            ensure_dns AAAA "$DOMAIN" '100::'
+            ensure_dns CNAME "www.${DOMAIN}" "$DOMAIN"
+            ROUTES=$(curl -sS --max-time 20 "$API/zones/$OWN/workers/routes" -H "Authorization: Bearer $TOK")
+            for PAT in "${DOMAIN}/*" "*.${DOMAIN}/*"; do
+              HAS=$(printf '%s' "$ROUTES" | python3 -c "import sys,json; rs=(json.load(sys.stdin).get('result') or []); print(sum(1 for r in rs if r.get('pattern')=='$PAT'))" 2>/dev/null || echo 0)
+              [ "$HAS" != 0 ] && { echo "[route] $PAT already present"; continue; }
+              R=$(curl -sS --max-time 20 -X POST "$API/zones/$OWN/workers/routes" \
+                -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                --data "{\"pattern\":\"$PAT\",\"script\":\"ontold-site-host\"}")
+              [ -n "$(printf '%s' "$R" | ok)" ] && echo "[route] $PAT -> ontold-site-host" \
+                || { echo "::error::could not add route $PAT ($(printf '%s' "$R" | err))"; exit 1; }
+            done
+            for H in "$DOMAIN" "www.${DOMAIN}"; do
+              MAP=$(curl -sS --max-time 20 -o /tmp/map -w '%{http_code}' -X PUT "https://${ZONE_NAME}/__domain" \
+                -H "Authorization: Bearer $PUBLISH_TOKEN" -H 'Content-Type: application/json' \
+                --data "{\"host\":\"$H\",\"slug\":\"${SLUG}\"}")
+              echo "mapping $H: $MAP $(head -c 200 /tmp/map)"
+              [ "$MAP" = 200 ] || { echo "::error::the site host refused the mapping for $H"; exit 1; }
+            done
+            echo "::notice::${DOMAIN} (and www) -> ${SLUG}, on our own zone: no SaaS, no cost. Live as soon as the zone is Active on our nameservers - https://${DOMAIN} then serves the site with Cloudflare's own certificate."
+            exit 0
+          fi
+          echo "[zone] ${DOMAIN} is not a zone in our account - taking the customer-domain (SaaS) path"
+
+          # Just-in-time credential for the SSL/custom-hostname calls:
+          # minted for 20 minutes, burned on exit. If minting is
+          # refused, the base token is tried as-is.
+          ACC=$(printf '%s' "${ACCOUNT_RAW:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          STOK="$TOK"; JID=''
+          if [ -n "$ACC" ]; then
+            echo "::add-mask::$ACC"
+            # The mint's stderr carries the REASON it was refused, and
+            # >/dev/null threw it away — run 1 failed on the fallback
+            # origin with no clue whether the base token lacked SSL
+            # rights or the mint had been declined upstream. Two
+            # different grants, one indistinguishable failure. Keep it.
+            J=$(CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs mint jit-attach-domain 20 'SSL and Certificates Write' 2>/tmp/mint.err || true)
+            [ -s /tmp/mint.err ] && echo "[cf-token] mint said: $(head -c 300 /tmp/mint.err)"
+            if [ -n "$J" ]; then
+              STOK=$(printf '%s' "$J" | jq -r .value); JID=$(printf '%s' "$J" | jq -r .id)
+              echo "::add-mask::$STOK"; echo "::add-mask::$JID"
+              echo "[cf-token] minted a 20-minute SSL and Certificates token for this run"
+            else
+              echo "[cf-token] could not mint a scoped token - trying the base token (add Account -> Account API Tokens -> Edit to enable just-in-time credentials)"
+            fi
+          fi
+          burnjit() { [ -n "$JID" ] && CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs burn "$JID" || true; }
+          trap burnjit EXIT
+
+          # ── CUSTOMER-DOMAIN (SaaS) PATH ────────────────────────────
+          # Zone id (the token has Zone Read since 2026-07-25).
+          ZID=$(zone_id "$ZONE_NAME")
+          [ -z "$ZID" ] && { echo "::error::cannot resolve the ${ZONE_NAME} zone"; exit 1; }
+          echo "::add-mask::$ZID"
+          echo "[zone] resolved ${ZONE_NAME}"
+
+          # 1a. The originless fallback record (idempotent; DNS Write held).
+          HAVE=$(curl -sS --max-time 20 "$API/zones/$ZID/dns_records?name=${FALLBACK_HOST}&type=AAAA" \
+            -H "Authorization: Bearer $TOK" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("result") or []))')
+          if [ "$HAVE" = 0 ]; then
+            R=$(curl -sS --max-time 20 -X POST "$API/zones/$ZID/dns_records" \
+              -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+              --data "{\"type\":\"AAAA\",\"name\":\"${FALLBACK_HOST}\",\"content\":\"100::\",\"proxied\":true,\"comment\":\"originless SaaS fallback - the Worker answers\"}")
+            [ -n "$(printf '%s' "$R" | ok)" ] && echo "[dns] created ${FALLBACK_HOST} AAAA 100:: (proxied)" \
+              || { echo "::error::could not create ${FALLBACK_HOST} ($(printf '%s' "$R" | err))"; exit 1; }
+          else
+            echo "[dns] ${FALLBACK_HOST} already exists"
+          fi
+
+          # 1b. The */* catch-all route that hands custom-hostname
+          #     traffic to the Worker. Owned HERE, not wrangler.toml:
+          #     Cloudflare rejects the pattern until the zone has
+          #     Cloudflare for SaaS enabled, and a config-file route
+          #     made every deploy fail in the meantime.
+          RHAVE=$(curl -sS --max-time 20 "$API/zones/$ZID/workers/routes" -H "Authorization: Bearer $TOK" \
+            | python3 -c 'import sys,json; rs=(json.load(sys.stdin).get("result") or []); print(sum(1 for r in rs if r.get("pattern")=="*/*"))' 2>/dev/null || echo 0)
+          if [ "$RHAVE" = 0 ]; then
+            RR=$(curl -sS --max-time 20 -X POST "$API/zones/$ZID/workers/routes" \
+              -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+              --data '{"pattern":"*/*","script":"ontold-site-host"}')
+            if [ -n "$(printf '%s' "$RR" | ok)" ]; then
+              echo "[route] */* -> ontold-site-host"
+            else
+              echo "::error::cannot add the */* route ($(printf '%s' "$RR" | err)). If the code is 100327, Cloudflare for SaaS is not enabled on ${ZONE_NAME} yet - dashboard: SSL/TLS -> Custom Hostnames -> Enable (first 100 hostnames free). Then re-run."
+              exit 1
+            fi
+          else
+            echo "[route] */* already present"
+          fi
+
+          # 1c. Point the zone's custom-hostname fallback origin at it.
+          FO=$(curl -sS --max-time 20 -X PUT "$API/zones/$ZID/custom_hostnames/fallback_origin" \
+            -H "Authorization: Bearer $STOK" -H 'Content-Type: application/json' \
+            --data "{\"origin\":\"${FALLBACK_HOST}\"}")
+          if [ -n "$(printf '%s' "$FO" | ok)" ]; then
+            echo "[saas] fallback origin -> ${FALLBACK_HOST}"
+          else
+            echo "::error::cannot set the fallback origin ($(printf '%s' "$FO" | err)). Two possible causes, both one dashboard visit: (a) the token lacks Zone -> SSL and Certificates -> Edit for ${ZONE_NAME} - add it to the existing CLOUDFLARE_API_TOKEN (same session as the Account API Tokens grant for the D1 mint); (b) Cloudflare for SaaS is not enabled on the zone - SSL/TLS -> Custom Hostnames -> Enable. Then re-run."
+            exit 1
+          fi
+
+          # 2. Register the hostname (idempotent: reuse if present).
+          CH=$(curl -sS --max-time 20 "$API/zones/$ZID/custom_hostnames?hostname=${DOMAIN}" -H "Authorization: Bearer $STOK")
+          CHID=$(printf '%s' "$CH" | python3 -c 'import sys,json; rs=(json.load(sys.stdin).get("result") or []); print(rs[0].get("id") if rs else "")')
+          if [ -z "$CHID" ]; then
+            R=$(curl -sS --max-time 20 -X POST "$API/zones/$ZID/custom_hostnames" \
+              -H "Authorization: Bearer $STOK" -H 'Content-Type: application/json' \
+              --data "{\"hostname\":\"${DOMAIN}\",\"ssl\":{\"method\":\"http\",\"type\":\"dv\",\"settings\":{\"min_tls_version\":\"1.2\"}}}")
+            [ -n "$(printf '%s' "$R" | ok)" ] || { echo "::error::could not register ${DOMAIN} ($(printf '%s' "$R" | err))"; exit 1; }
+            CHID=$(printf '%s' "$R" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["id"])')
+            echo "[saas] registered ${DOMAIN}"
+          else
+            echo "[saas] ${DOMAIN} already registered"
+          fi
+
+          # 3. The hostname -> slug mapping in the site host itself.
+          MAP=$(curl -sS --max-time 20 -o /tmp/map -w '%{http_code}' -X PUT "https://${ZONE_NAME}/__domain" \
+            -H "Authorization: Bearer $PUBLISH_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"host\":\"${DOMAIN}\",\"slug\":\"${SLUG}\"}")
+          echo "mapping: $MAP $(head -c 200 /tmp/map)"
+          [ "$MAP" = 200 ] || { echo "::error::the site host refused the mapping - is the Worker deployed with /__domain? (deploy-site-host runs on workers/site-host changes)"; exit 1; }
+
+          # 4. What only the domain owner can do, spelled out.
+          ST=$(curl -sS --max-time 20 "$API/zones/$ZID/custom_hostnames/$CHID" -H "Authorization: Bearer $STOK")
+          printf '%s' "$ST" | python3 -c 'import sys,json; r=(json.load(sys.stdin).get("result") or {}); s=(r.get("ssl") or {}); v=r.get("ownership_verification"); print("[saas] hostname status: "+str(r.get("status"))+", ssl: "+str(s.get("status"))); print("[dns-needed] TXT "+str(v.get("name"))+" = "+str(v.get("value"))) if v else None; [print("[ssl] "+str(e.get("message"))) for e in (s.get("validation_errors") or [])]'
+          echo "::notice::${DOMAIN} -> ${SLUG} wired on our side. The domain owner now sets: CNAME ${DOMAIN} -> ${FALLBACK_HOST} (plus any TXT printed above). TLS issues itself once the CNAME resolves; then https://${DOMAIN} serves the site."

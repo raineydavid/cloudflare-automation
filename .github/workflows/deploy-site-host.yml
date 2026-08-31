@@ -1,0 +1,379 @@
+# Provision + deploy the ontold-site-host Worker (serves *.ontold.site
+# from R2), then verify the live edge. One run = the whole go-live.
+#
+# Everything runs from GitHub (founder: "we still use github and maybe
+# workers to push to cf") with the secrets already in this repo:
+#   - R2 S3 keys (R2_ACCESS_KEY_ID/SECRET + account id) create the
+#     `ontold-sites` bucket — the SAME proven lane provision-r2.yml used.
+#   - CLOUDFLARE_API_TOKEN drives the zone/DNS checks + wrangler deploy.
+#   - PUBLISH_TOKEN (optional) gates the Worker's PUT /__publish; when
+#     set, the verify step does a real end-to-end smoke publish.
+#
+# Run 1 (30139428548) failed with wrangler auth 9106: CLOUDFLARE_ACCOUNT_ID
+# is an EMPTY secret, so wrangler fell back to /memberships discovery,
+# which scoped tokens cannot call. Fix: resolve the account id through
+# the same fallback chain provision-r2 uses and pass it explicitly.
+#
+# Credential history (so nobody re-derives this):
+#   2026-07-25 the ontold.site zone was confirmed already live on
+#   Cloudflare (camilo/delilah nameservers), and CLOUDFLARE_API_TOKEN was
+#   granted DNS Write + Zone Read + Workers Routes Write over
+#   workais.app / ontold.site / onloved.com, plus account-wide Workers
+#   Scripts Write. Before that it was R2-only, which is why every deploy
+#   from this repo had failed while storage worked fine.
+#
+# PUBLISH_TOKEN was set by the founder on 2026-07-25, so this run also
+# exercises the publish path: it pushes the token to the Worker and then
+# does a real end-to-end smoke publish (PUT a page, read it back) rather
+# than skipping with a warning as earlier runs did.
+name: deploy-site-host
+
+on:
+  push:
+    paths: ['workers/site-host/**', '.github/workflows/deploy-site-host.yml',
+            'scripts/publish_site_repo.mjs']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-site-host
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Same fallback chains as provision-r2.yml / seed-r2.yml — the
+      # account id has only ever been reliably present as R2_ACCOUNT_ID.
+      AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      RAW_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN:          ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # For recording the interactive example in its own repo, the same
+      # way fpl-gameweek records the league. The step that needs these
+      # was added without them, and said so rather than passing quietly:
+      # "no app token — the example is live but unversioned in its own
+      # repo". A warning that fires when something IS wrong.
+      GH_APP_CLIENT_ID:      ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID:             ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY:    ${{ secrets.GH_APP_PRIVATE_KEY }}
+      GITHUB_ORG:            ${{ vars.GH_APP_ORG || vars.GITHUB_ORG || 'ontolddotcom' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+      - name: Resolve account id
+        id: preflight
+        run: |
+          set -euo pipefail
+          # Account id: extract the 32-hex + mask (provision-r2 pattern).
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID secrets."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: R2 storage — create bucket + show what's actually stored
+        # Runs BEFORE any API-token check on purpose. R2 and the Cloudflare
+        # API are DIFFERENT credentials: this step uses the S3-style keys
+        # (R2_ACCESS_KEY_ID/SECRET), which have always worked and are why
+        # there is already data in Cloudflare. The API token below is a
+        # separate thing that only governs Workers/DNS. Printing the
+        # inventory here makes that split visible instead of confusing.
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "::warning::No R2 S3 keys — skipping bucket create. If ontold-sites doesn't exist, the Worker 404s everything."
+            exit 0
+          fi
+          ENDPOINT="https://${{ steps.preflight.outputs.account_id }}.r2.cloudflarestorage.com"
+          # Existence first: the bucket was created on 2026-07-25 and only
+          # has to EXIST for the Worker binding to resolve. Creating is the
+          # fallback, not the goal — so a create failure must never block a
+          # deploy when the bucket is already there. (Run 7 failed exactly
+          # that way: CreateBucket started returning AccessDenied, i.e. the
+          # R2 credential is authenticated but no longer authorised to make
+          # buckets, while the bucket itself was long since created.)
+          if aws s3api head-bucket --bucket ontold-sites --endpoint-url "$ENDPOINT" --region auto 2>/tmp/head; then
+            echo "::notice::ontold-sites exists and is reachable — nothing to do"
+          elif aws s3api create-bucket --bucket ontold-sites --endpoint-url "$ENDPOINT" --region auto 2>/tmp/err; then
+            echo "::notice::created bucket ontold-sites"
+          elif grep -qiE "BucketAlreadyOwnedByYou|already exists|BucketAlreadyExists" /tmp/err; then
+            echo "::notice::ontold-sites already exists — ok"
+          else
+            echo "::warning::Could not confirm or create ontold-sites. head-bucket said: $(tr -d '\n' < /tmp/head | cut -c1-200)"
+            echo "::warning::create-bucket said: $(tr -d '\n' < /tmp/err | cut -c1-200)"
+            echo "::warning::AccessDenied here means the R2 credential is authenticated but no longer authorised (its API token may have been narrowed, rotated, or expired — the R2 lanes seed-r2/provision-r2 depend on the same keys). NOT fatal: continuing to the Worker deploy, which fails loudly on its own if the bucket is genuinely absent."
+          fi
+          echo "--- buckets on this account (proof the R2 credentials work) ---"
+          aws s3 ls --endpoint-url "$ENDPOINT" || true
+          echo "--- objects currently in ontold-sites ---"
+          aws s3 ls "s3://ontold-sites" --recursive --endpoint-url "$ENDPOINT" | head -20 || true
+
+      - name: Cloudflare API token — capability test (Workers + zone)
+        id: cf
+        # Deliberately NOT gated on /user/tokens/verify: that endpoint is
+        # USER-scoped, so an ACCOUNT-owned token (what the R2 and Workers
+        # token screens hand you) returns "Invalid API Token" code 1000
+        # even when it works perfectly. Test the capability we actually
+        # need — listing Workers scripts is the same permission wrangler
+        # deploy requires.
+        #
+        # Verdicts are parsed with a JSON parser, never grep. Run 8 failed
+        # BECAUSE of a grep: Cloudflare returned a pretty-printed success
+        # body ('"success": true', with a space) listing real workers, and
+        # the pattern '"success":true' did not match it — so a working
+        # token was reported as broken. String-matching JSON is the bug.
+        run: |
+          set -uo pipefail
+          TOKEN=$(printf '%s' "${CF_API_TOKEN:-}" | tr -d '[:space:]')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN secret is empty."
+            exit 1
+          fi
+          ACC="${{ steps.preflight.outputs.account_id }}"
+          echo "token length: ${#TOKEN} (raw ${#CF_API_TOKEN})"
+
+          # One-liners on purpose: inside a YAML block scalar every line
+          # must stay indented, and indented Python is a syntax error.
+          # An unparseable body raises and exits non-zero, which is the
+          # verdict we want anyway.
+          ok() { python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") else 1)' 2>/dev/null; }
+
+          # Informational only — a failure here means "account-owned token",
+          # not "bad token". Never gate on it.
+          V=$(curl -sS "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer ${TOKEN}" || true)
+          echo "user-scoped verify: $(printf '%s' "$V" | ok && echo 'passes (user-owned token)' || echo 'does not apply (account-owned token — expected, not an error)')"
+
+          # THE REAL TEST: can this token manage Workers on the account?
+          W=$(curl -sS "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts" -H "Authorization: Bearer ${TOKEN}" || true)
+          if printf '%s' "$W" | ok; then
+            echo "::notice::token CAN manage Workers on this account — $(printf '%s' "$W" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("result") or []))' 2>/dev/null || echo '?') worker script(s) already deployed"
+          else
+            echo "::error::This token cannot manage Workers. Cloudflare said: $(printf '%s' "$W" | tr -d '\n' | cut -c1-300)"
+            echo "::error::Fix: dash.cloudflare.com → Manage Account → API Tokens → this token → Edit → add Account/Workers Scripts/Edit, Zone/Zone/Read, Zone/DNS/Edit, Zone/Workers Routes/Edit, AND set Zone Resources to include ontold.site → Continue → Save. Editing preserves the token VALUE, so the GitHub secret does not change. Then re-run this workflow."
+            exit 1
+          fi
+
+          # Zone: is ontold.site on this account, and can the token see it?
+          # Parsed, not regexed — pretty-printed JSON breaks sed patterns
+          # written for the compact form, which is how run 8 went wrong.
+          ZONES=$(curl -sS "https://api.cloudflare.com/client/v4/zones?name=ontold.site" -H "Authorization: Bearer ${TOKEN}" || true)
+          read -r ZONE_ID STATUS <<<"$(printf '%s' "$ZONES" | python3 -c 'import sys,json; rs=json.load(sys.stdin).get("result") or [{}]; r=rs[0] if rs else {}; print(r.get("id",""), r.get("status",""))' 2>/dev/null || echo '')"
+          if [ -n "$ZONE_ID" ]; then
+            echo "::add-mask::$ZONE_ID"
+            echo "::notice::zone ontold.site found, status ${STATUS:-unknown} (must be 'active'; 'pending' = nameservers not switched at the registrar yet)"
+            echo "zone_id=$ZONE_ID" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$ZONES" | ok; then
+            echo "::warning::Token works but sees NO ontold.site zone — add the domain at dash → Websites → Add a domain, and point the registrar's nameservers at Cloudflare. Continuing so wrangler's own error is visible."
+          else
+            echo "::warning::Zone lookup refused for this token ($(echo "$ZONES" | tr -d '\n' | cut -c1-200)) — add Zone:Read. Continuing."
+          fi
+
+      - name: Ensure wildcard DNS (*.ontold.site → proxied placeholder)
+        # The Worker route only fires if DNS resolves through Cloudflare.
+        # 192.0.2.1 (TEST-NET) proxied is the standard workers-only record.
+        run: |
+          set -euo pipefail
+          ZONE_ID="${{ steps.cf.outputs.zone_id }}"
+          if [ -z "$ZONE_ID" ]; then
+            echo "::warning::No zone id — skipping DNS. Once the zone exists, re-run this workflow."
+            exit 0
+          fi
+          TOKEN=$(printf '%s' "${CF_API_TOKEN}" | tr -d '[:space:]')
+          # TWO records: '*' for published sites, '@' for the apex front
+          # door. A wildcard does not cover the bare domain, so without
+          # the apex record ontold.site itself never resolves.
+          # JSON-parsed, not grepped — same pretty-print trap as above.
+          ensure_record() {
+            local name="$1" fqdn="$2"
+            local existing resp
+            existing=$(curl -sS "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=A" \
+              -H "Authorization: Bearer ${TOKEN}")
+            if printf '%s' "$existing" | FQDN="$fqdn" python3 -c 'import sys,json,os; rs=json.load(sys.stdin).get("result") or []; sys.exit(0 if any(r.get("name")==os.environ["FQDN"] for r in rs) else 1)' 2>/dev/null; then
+              echo "::notice::${fqdn} A record already present — ok"
+              return 0
+            fi
+            resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+              -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"${name}\",\"content\":\"192.0.2.1\",\"proxied\":true,\"comment\":\"ontold-site-host worker route target\"}")
+            if printf '%s' "$resp" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") else 1)' 2>/dev/null; then
+              echo "::notice::created proxied A record for ${fqdn}"
+            else
+              echo "::warning::could not create ${fqdn} ($(printf '%s' "$resp" | tr -d '\n' | cut -c1-200)) — add DNS:Edit to the token, or create it in the dash: DNS → Add record → A, name ${name}, IPv4 192.0.2.1, proxied ON."
+            fi
+          }
+          ensure_record '*' '*.ontold.site'
+          ensure_record '@' 'ontold.site'
+
+      - name: Deploy Worker
+        working-directory: workers/site-host
+        env:
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: npx wrangler@4 deploy
+
+      - name: Set publish token secret
+        working-directory: workers/site-host
+        env:
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          if [ -n "$PUBLISH_TOKEN" ]; then
+            printf '%s' "$PUBLISH_TOKEN" | npx wrangler@4 secret put PUBLISH_TOKEN
+          else
+            echo "::warning::PUBLISH_TOKEN repo secret not set — serving works, publishing stays 401 until it is (repo Settings → Secrets → Actions → PUBLISH_TOKEN, e.g. openssl rand -hex 32)."
+          fi
+
+      - name: Verify live edge (branded 404 + optional smoke publish)
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A UNIQUE slug per run. The fixed `ontold-smoke-test` slug made
+          # this job succeed exactly ONCE and fail forever after: the step
+          # asserts a branded 404 BEFORE publishing, but the previous run
+          # published a real page to that same slug and nothing deleted
+          # it. Run 2 onwards read run 1's page and bailed before ever
+          # testing publish. The failure that exposed this still carried
+          # the marker `smoke-30148586660` — a run from two days earlier.
+          #
+          # A fresh subdomain also sidesteps the worker's own
+          # `cache-control: public, max-age=60` on published pages, which
+          # would otherwise let a just-deleted page answer 200 for a
+          # minute. Never published, never cached.
+          HOST="ontold-smoke-${GITHUB_RUN_ID}.ontold.site"
+          # Route + cert can take a few seconds after first deploy.
+          for i in 1 2 3 4 5 6; do
+            BODY=$(curl -sS --max-time 15 "https://${HOST}/" || true)
+            # The marker, not the copy. Greping the prose meant that
+            # rewriting this page hung the deploy and then failed it.
+            if echo "$BODY" | grep -q 'name="ontold-status" content="unclaimed"'; then
+              echo "::notice::edge LIVE: https://${HOST} serves the branded 404 (worker + route + wildcard cert all working)"
+              break
+            fi
+            if [ "$i" = 6 ]; then
+              echo "::error::https://${HOST} did not return the site-host 404 after 6 tries. First 200 chars of last response: $(echo "$BODY" | tr -d '\n' | cut -c1-200)"
+              echo "::error::If DNS/zone steps warned above, fix those first; otherwise the route may still be propagating — re-run this workflow."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          if [ -z "${PUBLISH_TOKEN:-}" ]; then
+            echo "::warning::skipping smoke publish (no PUBLISH_TOKEN). Serving verified; publishing untested."
+            exit 0
+          fi
+          MARKER="smoke-$GITHUB_RUN_ID"
+          PUB=$(curl -sS -X PUT "https://${HOST}/__publish" \
+            -H "Authorization: Bearer ${PUBLISH_TOKEN}" \
+            -H "Content-Type: text/html" \
+            --data "<!doctype html><title>ontold smoke test</title><h1>ontold.site is live</h1><p>${MARKER}</p>")
+          echo "$PUB" | grep -q '"status":"success"' || { echo "::error::publish failed: $PUB"; exit 1; }
+          sleep 3
+          LIVE=$(curl -sS "https://${HOST}/?nocache=${MARKER}")
+          if echo "$LIVE" | grep -q "$MARKER"; then
+            echo "::notice::END-TO-END VERIFIED: published a page and read it back at https://${HOST}"
+          else
+            echo "::error::published ok but readback didn't show the new page (cache or R2 issue)"; exit 1
+          fi
+
+          # The interactive example, published through the SAME route.
+          #
+          # Founder (2026-07-31): "i want one that is interactive - ie shop
+          # my wardrobe. lets make that example and also show where we have
+          # stored it." It publishes here rather than by hand so the page
+          # in the repo and the page on the internet cannot drift, and so
+          # a real page — not a throwaway smoke stub — proves the publish
+          # route on every deploy.
+          #
+          # ?overwrite=1 is REQUIRED and correct: the slug is deliberately
+          # ours and republished on every deploy, which is exactly the
+          # "taking a live slug on purpose" case the 409 asks callers to
+          # be explicit about. An unchanged republish is deduped by the
+          # Worker and writes nothing, so this is free when the file has
+          # not moved.
+          EXAMPLE=workers/site-host/examples/nothing-to-wear.html
+          EX=$(curl -sS -X PUT "https://nothing-to-wear.ontold.site/__publish?overwrite=1" \
+            -H "Authorization: Bearer ${PUBLISH_TOKEN}" \
+            -H "Content-Type: text/html" \
+            --data-binary "@${EXAMPLE}")
+          if printf '%s' "$EX" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("status")=="success" else 1)' 2>/dev/null; then
+            echo "::notice::example live at https://nothing-to-wear.ontold.site$(printf '%s' "$EX" | python3 -c 'import sys,json; print(" (unchanged)" if json.load(sys.stdin).get("unchanged") else "")' 2>/dev/null)"
+            echo "::notice::stored at r2://ontold-sites/sites/nothing-to-wear/index.html (history under versions/)"
+          else
+            echo "::error::example publish failed: $(printf '%s' "$EX" | tr -d '\n' | cut -c1-300)"
+            exit 1
+          fi
+
+          # ── The example gets its own repo, like every other site ──
+          #
+          # Founder: "but why isnt it in its own github". Because this
+          # one was the exception and nobody had noticed: #9 gives every
+          # generated site a repo in ontolddotcom, and the lanes that
+          # publish through publish_site_repo.mjs get one. This page is
+          # published as a SIDE EFFECT of deploying the Worker, from a
+          # file inside our own monorepo, so it never went through that
+          # lane and had no version record anywhere.
+          #
+          # It is also the example the front door points at as "one you
+          # can actually open", which makes it the worst one to have no
+          # history.
+          app_token=$(node scripts/mint_app_token.mjs || true)
+          [ -n "$app_token" ] && echo "::add-mask::$app_token"
+          if [ -z "$app_token" ]; then
+            echo "::warning::no app token — the example is live but unversioned in its own repo"
+          else
+            SYSTEM_GITHUB_TOKEN="$app_token" SLUG=nothing-to-wear \
+              PAGE=workers/site-host/examples/nothing-to-wear.html SPEC= \
+              SITE_DESCRIPTION='A capsule wardrobe you can filter, pick from and pack — an interactive example published on Ontold.' \
+              node scripts/publish_site_repo.mjs \
+              || echo "::warning::could not record the example in its own repo"
+          fi
+
+          # ── What the network tells crawlers, read back from the edge ──
+          #
+          # The apex sitemap and robots are generated per request from
+          # the bucket, so nothing in the repo proves what they say.
+          # Printing them here is the only way anyone sees the real
+          # thing (the agent that writes this cannot reach the internet).
+          echo "--- https://ontold.site/robots.txt ---"
+          curl -sS --max-time 15 "https://ontold.site/robots.txt" | head -c 400
+          MAP=$(curl -sS --max-time 15 "https://ontold.site/sitemap.xml")
+          # Whole lines, and a count. `head -c` cut mid-element and made
+          # a healthy sitemap read as corrupt XML in the log.
+          echo "--- https://ontold.site/sitemap.xml ($(printf '%s' "$MAP" | grep -c '<loc>') URLs) ---"
+          printf '%s\n' "$MAP" | head -n 60
+          printf '%s' "$MAP" | grep -q "<urlset" \
+            || { echo "::error::the apex sitemap is not a sitemap"; exit 1; }
+          # Our own test pages must never be offered to a crawler.
+          if printf '%s' "$MAP" | grep -q "ontold-smoke-"; then
+            echo "::error::the apex sitemap is advertising a smoke-test page"; exit 1
+          fi
+          # The way back to ontold.com, in both the forms that matter:
+          # the badge a visitor clicks and the node an answer engine reads.
+          HOME_PAGE=$(curl -sS --max-time 15 "https://nothing-to-wear.ontold.site/?nocache=${GITHUB_RUN_ID}")
+          printf '%s' "$HOME_PAGE" | grep -q 'ontold.com/?ref=' \
+            || { echo "::error::a served page carries no badge link home"; exit 1; }
+          printf '%s' "$HOME_PAGE" | grep -q '"creator"' \
+            || { echo "::error::a served page carries no maker structured data"; exit 1; }
+          echo "::notice::SEO verified: apex sitemap + robots serving, badge and creator node on a live page"
+
+          # Clean up after ourselves. The Worker has no DELETE route, but
+          # this job already holds the R2 S3 credentials that created the
+          # bucket, so the smoke page goes straight from storage.
+          # Best-effort: a failed cleanup leaves litter, not a red build,
+          # and the unique slug means litter never breaks the next run.
+          SLUG="ontold-smoke-${GITHUB_RUN_ID}"
+          ENDPOINT="https://${{ steps.preflight.outputs.account_id }}.r2.cloudflarestorage.com"
+          aws s3 rm "s3://ontold-sites/sites/${SLUG}/" --recursive \
+            --endpoint-url "$ENDPOINT" --region auto \
+            && echo "::notice::smoke page cleaned up (${SLUG})" \
+            || echo "::warning::smoke page left in R2 under sites/${SLUG}/ — harmless, next run uses a new slug"

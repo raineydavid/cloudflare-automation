@@ -1,0 +1,1 @@
+{"repo":"raineydavid/ontold","secret":"CLOUDFLARE_EMAIL_TOKEN","why":"audit log read, to answer who changed the zone, and DNS write to publish a DMARC policy"}

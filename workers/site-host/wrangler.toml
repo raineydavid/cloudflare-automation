@@ -1,0 +1,35 @@
+name = "ontold-site-host"
+main = "src/index.mjs"
+compatibility_date = "2026-07-01"
+
+# Serves every published Ontold site at https://<slug>.ontold.site —
+# Ontold's OWN publishing front door, deliberately third-party-style:
+# no WorkAIs GitHub org involvement, no per-site cert provisioning lag
+# (Cloudflare's wildcard edge cert covers *.ontold.site instantly).
+#
+# Requires (one-time, founder):
+#   - the ontold.site zone added to this Cloudflare account,
+#   - an R2 bucket named `ontold-sites` in the same account.
+# Publishes are R2 writes under sites/<slug>/index.html (see src).
+
+# Two routes: the wildcard serves published sites, and the apex serves
+# the front door (src/landing.mjs). The wildcard does NOT match the bare
+# domain, so without the second entry ontold.site itself is dead — which
+# is exactly where a visitor lands after trimming the subdomain off a
+# published address.
+routes = [
+  { pattern = "*.ontold.site/*", zone_name = "ontold.site" },
+  { pattern = "ontold.site/*",   zone_name = "ontold.site" }
+]
+# One more route exists in production that is deliberately NOT listed
+# here: a */* catch-all that delivers custom-hostname traffic
+# (lorrybus.com) to this Worker. Cloudflare rejects that pattern until
+# the zone has Cloudflare for SaaS enabled (error 100327), so putting
+# it in this file made EVERY deploy fail on zones where SaaS is still
+# off. The attach-domain workflow owns it instead: it adds the route
+# via the API on first successful run, and routes added out-of-band
+# survive wrangler deploys.
+
+[[r2_buckets]]
+binding = "SITES"
+bucket_name = "ontold-sites"

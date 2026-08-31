@@ -1,0 +1,112 @@
+# Publish a DMARC policy on a zone that has none.
+#
+# ## Why this is separate from the mail provisioning
+#
+# DMARC is not needed for mail to work, which is precisely why the gap
+# went unnoticed: ontold.com sends, receives and delivers, and has no
+# policy on its apex — only on `mail.ontold.com`. A policy on a sending
+# subdomain reads as coverage and is not, so the domain customers
+# actually see gives receivers no instruction about mail forged as it,
+# and nothing reports when somebody tries.
+#
+# ## Report by default, and `p=none` when it applies
+#
+# `p=none` tells receivers to evaluate DMARC and take NO action on
+# failure. It cannot reject, quarantine or delay a message — a domain
+# publishing `p=none` delivers exactly as one publishing nothing. That
+# is what makes it safe to publish before every sender is inventoried,
+# and publishing it is how you find out who they are.
+#
+# Going straight to `p=reject` on a domain whose senders are not known
+# is how a company stops its own invoices arriving. Order: publish
+# `p=none`, read the reports, fix what signs badly, then tighten.
+#
+# ## It never touches an existing policy
+#
+# `ontold.site` carries `p=reject; sp=reject; adkim=s; aspf=s`.
+# Publishing `p=none` over that would disarm the domain while reporting
+# success, so the script creates and never updates. Tightening an
+# existing policy has a blast radius and belongs to a person.
+#
+#   echo '{"zone":"ontold.com"}'                > .github/dispatch-requests/provision-dmarc.json
+#   echo '{"zone":"ontold.com","apply":true}'   > ...   # actually publish
+
+name: provision-dmarc
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/provision-dmarc.json'
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: 'Zone to check'
+        required: true
+      apply:
+        description: 'Publish p=none when nothing is published (unticked = report only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-dmarc
+  cancel-in-progress: false
+
+jobs:
+  dmarc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      - name: Which zone, and whether to write
+        id: what
+        env:
+          REQ: .github/dispatch-requests/provision-dmarc.json
+          IN_ZONE: ${{ inputs.zone }}
+          IN_APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          ZONE="${IN_ZONE:-}"
+          APPLY="${IN_APPLY:-false}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            ZONE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("zone",""))' "$REQ")
+            APPLY=$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1])).get("apply",False)).lower())' "$REQ")
+          fi
+          if [ -z "$ZONE" ]; then
+            echo "::error::no zone. Put {\"zone\":\"example.com\"} in $REQ."
+            exit 1
+          fi
+          echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          echo "[dmarc] zone=$ZONE apply=$APPLY"
+
+      - name: Report, and publish when asked
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # +e: the script exits non-zero when it cannot read the zone,
+          # and the summary is the part worth keeping.
+          set +e
+          set -o pipefail
+          {
+            echo "### DMARC · ${{ steps.what.outputs.zone }}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.what.outputs.apply }}" = "true" ]; then
+            python3 scripts/dmarc_apply.py "${{ steps.what.outputs.zone }}" --apply | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/dmarc_apply.py "${{ steps.what.outputs.zone }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          RC=$?
+          {
+            echo '```'
+            echo ""
+            echo "\`p=none\` is monitor-only: delivery is identical to publishing nothing."
+            echo "The next step is a reporting address, then \`p=reject\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

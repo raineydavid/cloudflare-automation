@@ -1,0 +1,116 @@
+# Give a domain's inbound mail back to the provider that had it.
+#
+# The counterpart to switch-inbound.yml, which on 2026-08-28 removed
+# ontold.com's mxa/mxb.mailgun.org and moved inbound to Cloudflare Email
+# Routing. Those records were SQUARESPACE EMAIL FORWARDING, which runs
+# on Mailgun — so what was read as a stale provider was live forwarding,
+# and every pre-existing address on the domain stopped that minute.
+#
+# Report-only by default, same as the workflow that caused this. The
+# difference that matters is the guard: it refuses when the apex carries
+# an MX belonging to neither Cloudflare nor the provider being restored,
+# because acting on a provider nobody could account for is exactly what
+# went wrong.
+#
+#   echo '{"zone":"ontold.com","apply":false}' \
+#     > .github/dispatch-requests/restore-inbound.json
+
+name: restore-inbound
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/restore-inbound.json'
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: 'Zone whose inbound is being restored'
+        required: true
+        default: 'ontold.com'
+      apply:
+        description: 'Make the change (off = report only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-inbound
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Read the request
+        id: req
+        env:
+          REQ: .github/dispatch-requests/restore-inbound.json
+          EVENT: ${{ github.event_name }}
+          IN: ${{ toJSON(inputs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, pathlib
+          src = json.loads(os.environ.get("IN") or "{}")
+          if os.environ.get("EVENT") != "workflow_dispatch":
+              p = pathlib.Path(os.environ["REQ"])
+              src = json.loads(p.read_text()) if p.is_file() else {}
+          print(f"zone={src.get('zone') or 'ontold.com'}")
+          # Anything but an explicit true reports rather than writes.
+          print(f"apply={'1' if src.get('apply') is True else ''}")
+          PY
+
+      # Before anything is changed: what is Cloudflare Email Routing
+      # actually doing? "No rule" and "rule to an unverified
+      # destination" both deliver nothing and look identical from the
+      # outside, and they are fixed completely differently.
+      - name: What routing is doing now
+        if: always()
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          ZONE: ${{ steps.req.outputs.zone }}
+        run: |
+          set -o pipefail
+          {
+            echo "### routing state · ${{ steps.req.outputs.zone }}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/routing_state.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore it
+        env:
+          # The same pair switch-inbound and provision-email-routing use.
+          # CLOUDFLARE_API_TOKEN alone can list zones and NOT their DNS
+          # records, which 403s halfway through and reads like the zone
+          # is gone rather than like a permission is missing.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          ZONE: ${{ steps.req.outputs.zone }}
+          RESTORE_APPLY: ${{ steps.req.outputs.apply }}
+        run: |
+          set +e
+          set -o pipefail
+          {
+            echo "### restore-inbound · ${{ steps.req.outputs.zone }}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/restore_inbound.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          RC=$?
+          {
+            echo '```'
+            echo ""
+            echo "Receiving is the apex MX. Sending is mail.<zone> and is not touched."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

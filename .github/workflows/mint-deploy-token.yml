@@ -1,0 +1,674 @@
+# Mint a sibling property's deploy credential from ontold's, and store it
+# there.
+#
+# ## Why this is not named for one repository any more
+#
+# It was `mint-nationalff-token.yml`, and every piece of it agreed: the
+# trigger path, the default target, the token name, the closing notice.
+# The name was accurate when it was written and became a trap the moment
+# a second property needed the same thing.
+#
+# Pointing it at Screening Studio surfaced three separate hardcodings in
+# one run — the request file's `repo` field was read by nothing, the
+# token name was fixed at `nationalff-deploy`, and there was no
+# allowlist. The token name was the dangerous one: minting for a second
+# repo would have created a token under nationalff's name, and the
+# revoke-predecessors step below would then have deleted nationalff's
+# live credential and taken the directory's Worker down.
+#
+# None of those were separate mistakes. They were one mistake — a
+# general mechanism wearing one repository's name — expressed four
+# times. So the name is general now, and the target is required rather
+# than defaulted, because a default is how the next caller gets a
+# credential for a repository they did not ask about.
+#
+# ## What it does
+#
+# A property cannot deploy its Worker until two secrets exist on its own
+# repo: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. Their own
+# provisioning workflows say no agent should mint that credential for
+# itself, and this does not: it mints from the credential ontold already
+# holds, narrowed to what the target actually spends, and hands the
+# result over through the ontold-app installation.
+#
+# Permission group ids are asked of the API rather than hardcoded, because
+# they differ per endpoint family. The names are asked for in both
+# spellings: Cloudflare's own permissions reference lists these as "Edit"
+# in the account table and "Write" in the token-management responses, and
+# which one a given account returns is not worth guessing.
+#
+# The order of the two writes is deliberate. An account id is not a secret,
+# so it goes first — if the app cannot write to the repo, that surfaces
+# before a live credential has been handed to a path that does not work.
+# Anything that fails after the token exists revokes it: a credential that
+# exists only in a log is a leak, and one nobody holds is litter.
+name: mint-deploy-token
+
+# Asked for, never incidental. Provisioning another repo's credentials
+# is not something that should happen because this file was edited, so
+# the push trigger watches a request file rather than this workflow's own
+# path — the same shape as mint-d1-token.yml.
+#
+# The request file is also what makes this runnable before it reaches the
+# default branch: workflow_dispatch only resolves against the default
+# branch, a push trigger fires from any of them.
+#
+#   echo '{"repo":"raineydavid/screening"}' \
+#     > .github/dispatch-requests/mint-deploy-token.json
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/mint-deploy-token.json'
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Target repository, owner/name'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      ACCOUNT_RAW: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      # Who may be provisioned. A variable rather than a secret: these are
+      # repository names, which are not confidential, and a variable can
+      # be read back to check what is set. Unset means nobody.
+      MINT_ALLOWED_REPOS: ${{ vars.MINT_ALLOWED_REPOS }}
+      # Empty on a push, where the request file supplies it instead. No
+      # default: a credential minted for whichever repository happened to
+      # be written here first is exactly the failure this file already
+      # had once.
+      TARGET: ${{ inputs.repo }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Resolve which repository this is for
+        # The request file carried a `repo` field that nothing read: on a
+        # push `inputs.repo` is empty and TARGET fell through to a
+        # hardcoded default whatever the file said, so a request naming
+        # another repository provisioned the wrong one and reported
+        # success — the worst shape a provisioning bug can take.
+        #
+        # And an ALLOWLIST, which matters more. This step decides where a
+        # live Cloudflare credential gets written, from a file in the
+        # tree. Without a fixed set, anyone who can land a commit can have
+        # a token minted into a repository they control. See below for
+        # where the set comes from and why it is not compiled in here.
+        run: |
+          set -euo pipefail
+          REQ=.github/dispatch-requests/mint-deploy-token.json
+          if [ "${{ github.event_name }}" = "push" ] && [ -f "$REQ" ]; then
+            FROM_FILE=$(python3 -c "import json;print(json.load(open('$REQ')).get('repo',''))" 2>/dev/null || true)
+            [ -n "$FROM_FILE" ] && TARGET="$FROM_FILE"
+            FROM_FILE_SECRET=$(python3 -c "import json;print(json.load(open('$REQ')).get('secret',''))" 2>/dev/null || true)
+            [ -n "$FROM_FILE_SECRET" ] && SECRET_NAME="$FROM_FILE_SECRET"
+          fi
+          if [ -z "${TARGET:-}" ]; then
+            echo "::error::no target repository. On a dispatch, set the repo input; on a push, put {\"repo\":\"owner/name\"} in $REQ."
+            exit 1
+          fi
+          # ## Who may be provisioned, and why it is not a constant
+          #
+          # This is meant to become infrastructure other people run, so a
+          # list of three repository names compiled into the workflow is
+          # the wrong shape twice over: it makes adding a property a code
+          # change, and it makes the whole thing unusable by anybody else
+          # without a fork.
+          #
+          # So it is configuration, in two places, checked in that order:
+          #
+          #   .github/mint-allowed-repos.txt   one owner/name per line
+          #   MINT_ALLOWED_REPOS               a variable, for anyone
+          #                                    running this without a fork
+          #
+          # The file first, deliberately. Who may receive a credential is
+          # exactly the kind of change that should appear in a diff and be
+          # reviewable — a dashboard variable changes with no trace and no
+          # reviewer. The variable exists so somebody else can use this
+          # without editing our tree.
+          #
+          # UNSET MEANS NOTHING IS ALLOWED, never everything. This step
+          # decides where a live Cloudflare credential is written; the
+          # failure mode of an open default is silent and total, and the
+          # failure mode of a closed one is a clear error the first time
+          # somebody uses it.
+          #
+          # ## The real boundary is the installation, not this list
+          #
+          # Further down, the run fails unless the ontold-app installation
+          # can see the target and write its secrets. That is the actual
+          # grant: somebody who has not installed the app on a repository
+          # cannot have anything written to it however this list reads.
+          #
+          # This list is the second lock — it stops a request file in THIS
+          # tree from redirecting a credential to some other repo the app
+          # also happens to reach. When this becomes multi-tenant, the
+          # installation is the permission model and this becomes a
+          # per-installation setting rather than an account-wide one.
+          LIST=.github/mint-allowed-repos.txt
+          ALLOWED=""
+          # Comments and blank lines stripped, so the file can explain
+          # itself to whoever reads it next.
+          [ -f "$LIST" ] && ALLOWED=$(sed -e 's/#.*//' "$LIST" | tr ',' '\n' | tr -s '[:space:]' ' ')
+          [ -z "${ALLOWED// /}" ] && ALLOWED=$(printf '%s' "${MINT_ALLOWED_REPOS:-}" | tr ',' ' ')
+          if [ -z "${ALLOWED// /}" ]; then
+            echo "::error::no allowlist: ${LIST} is absent or empty and MINT_ALLOWED_REPOS is unset, so no repository may be provisioned. This fails closed on purpose."
+            exit 1
+          fi
+          OK=no
+          for CANDIDATE in $(printf '%s' "$ALLOWED" | tr ',' ' '); do
+            [ "$CANDIDATE" = "$TARGET" ] && OK=yes && break
+          done
+          if [ "$OK" != yes ]; then
+            echo "::error::'$TARGET' is not in the allowlist. Add it to ${LIST}, deliberately, if that is what you want."
+            exit 1
+          fi
+          # ## Which secret this lands in, and why it is a choice
+          #
+          # Default: CLOUDFLARE_API_TOKEN, the deploy credential. But
+          # this mint's permission set has NO R2 and NO Workers Routes,
+          # so overwriting a live deploy token to gain one capability
+          # takes away two — deploy-mcp, deploy-site-host and seed-r2 all
+          # need what is not on the list.
+          #
+          # So a purpose-scoped credential can be minted into its own
+          # name instead, and consumers prefer it and fall back. Adding a
+          # capability then cannot subtract one, which is the property
+          # that matters when the alternative is editing the credential
+          # everything depends on.
+          #
+          # Validated hard: this value reaches `gh secret set`, and it
+          # comes from a file in the tree.
+          SECRET_NAME="${SECRET_NAME:-CLOUDFLARE_API_TOKEN}"
+          if ! printf '%s' "$SECRET_NAME" | grep -qE '^[A-Z][A-Z0-9_]{2,63}$'; then
+            echo "::error::'$SECRET_NAME' is not a secret name (A-Z, 0-9 and _ only)."
+            exit 1
+          fi
+          # The token's name follows the repo AND the purpose, so two
+          # properties do not share one credential and revoking a token
+          # of one purpose cannot silently disarm another. Getting this
+          # wrong once would have had the revoke step delete a live
+          # deploy credential.
+          case "$SECRET_NAME" in
+            CLOUDFLARE_API_TOKEN) PURPOSE=deploy ;;
+            *) PURPOSE=$(printf '%s' "$SECRET_NAME" | tr 'A-Z_' 'a-z-') ;;
+          esac
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+          echo "SECRET_NAME=$SECRET_NAME" >> "$GITHUB_ENV"
+          echo "TOKEN_NAME=${TARGET##*/}-${PURPOSE}" >> "$GITHUB_ENV"
+          echo "::notice::provisioning ${TARGET} (secret: ${SECRET_NAME}, token: ${TARGET##*/}-${PURPOSE})"
+
+      - name: Mint, verify, store (or revoke)
+        run: |
+          set -euo pipefail
+          TOK=$(printf '%s' "${CF_TOKEN:-}" | tr -d '[:space:]')
+          ACC=$(printf '%s' "${ACCOUNT_RAW:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -n "$TOK" ] && echo "::add-mask::$TOK"
+          [ -n "$ACC" ] && echo "::add-mask::$ACC"
+          [ -z "$TOK" ] && { echo "::error::CLOUDFLARE_API_TOKEN secret missing"; exit 1; }
+          [ -z "$ACC" ] && { echo "::error::no Cloudflare account id in secrets"; exit 1; }
+          case "$TARGET" in
+            */*) ORG="${TARGET%%/*}" ;;
+            *) echo "::error::repo input must be owner/name, got '$TARGET'"; exit 1 ;;
+          esac
+
+          # 1. The permission group catalogue, from whichever endpoint
+          #    answers. Account-scoped first: it is the one that lists
+          #    account permissions, which is all we want.
+          PG_JSON=/tmp/permission_groups.json
+          : > "$PG_JSON"
+          for URL in \
+            "https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens/permission_groups" \
+            "https://api.cloudflare.com/client/v4/user/tokens/permission_groups"; do
+            curl -sS --max-time 20 "$URL" -H "Authorization: Bearer $TOK" -o "$PG_JSON" || continue
+            if python3 -c 'import json,sys; d=json.load(open("/tmp/permission_groups.json")); sys.exit(0 if d.get("success") and d.get("result") else 1)' 2>/dev/null; then
+              break
+            fi
+            : > "$PG_JSON"
+          done
+          if [ ! -s "$PG_JSON" ]; then
+            echo "::error::cannot read token permission groups - the existing CLOUDFLARE_API_TOKEN lacks token-management rights. Smallest fix: edit that token in the dashboard and add Account -> Account API Tokens -> Edit (editing preserves its value, so no GitHub secret changes), then re-run."
+            exit 1
+          fi
+
+          # 2. Resolve both permissions, or say which one is missing. A
+          #    token minted with only half of what the deploy needs fails
+          #    later, somewhere less obvious than here.
+          if ! BODY=$(python3 - "$PG_JSON" 2>/tmp/pg_err <<PY
+          import json, sys
+
+          # Read as well as write, for both. The API splits these where the
+          # dashboard's "Edit" bundles them, and a write-only token cannot
+          # list what it is about to write to — which is not just a probe
+          # problem: the target's migrate and execute steps both read.
+          # Email Routing is here because provision-email.yml (#4, #24)
+          # could not run: the first token was scoped to D1 and Workers
+          # Scripts only, so the workflow that onboards the sending domain
+          # had no credential and the whole thing was reported as needing a
+          # person. It did not. It needed four more permission groups.
+          WANT = [
+              # Zone Read is zone-scoped and was absent. Every other zone
+              # group here is about Email Routing specifically; without the
+              # base read the policy may grant nothing at all, which is
+              # what zones/{id}/email/routing answering 10000 looks like.
+              ["D1 Read"],
+              ["D1 Write", "D1 Edit"],
+              ["Workers Scripts Read"],
+              ["Workers Scripts Write", "Workers Scripts Edit"],
+              ["Email Routing Addresses Read"],
+              ["Email Routing Addresses Write", "Email Routing Addresses Edit"],
+              ["Email Routing Rules Read"],
+              ["Email Routing Rules Write", "Email Routing Rules Edit"],
+              # Sending is not Routing. Routing receives mail at
+              # webmaster@ (#4); sending is what onboards the domain the
+              # sign-in link leaves from (#24), and it has its own DKIM
+              # selector. The catalogue offers both, and asking only for
+              # Routing is how #24 would have stayed blocked after #4 was
+              # fixed, for a reason nobody would have looked for twice.
+              ["Email Sending Read"],
+              ["Email Sending Write", "Email Sending Edit"],
+          ]
+          # Zone-scoped basics, absent until now. Every other zone group
+          # here is about Email Routing specifically, and without a base
+          # read the policy may grant nothing — which is what
+          # zones/{id}/email/routing answering 10000 looks like.
+          #
+          # OPTIONAL: a spelling this account does not offer is reported
+          # and skipped, not fatal. The required list above is what the
+          # deploy cannot work without.
+          OPTIONAL = [
+              ["Zone Read"],
+              ["Zone Settings Read"],
+              ["Zone Settings Write", "Zone Settings Edit"],
+              # DNS read, because the MX guard depends on it and had
+              # been running blind. email_routing.py refuses to enable
+              # routing on a zone that already receives mail — enabling
+              # rewrites the MX and would take delivery from whoever
+              # holds it — and without this group the read comes back
+              # empty, which the guard read as "no MX, safe to proceed".
+              # It reported "nothing receives for this domain" about a
+              # zone Cloudflare then refused with 2008 Non-Cloudflare MX
+              # records exist. The guard now fails closed on an
+              # unreadable zone, so the absence of this group blocks
+              # provisioning rather than waving it through — which is
+              # the right way round, and the reason it is worth asking
+              # for. Aliases because the account's spelling is read from
+              # its own catalogue, never from memory.
+              ["DNS Read", "DNS Records Read", "Zone DNS Read"],
+              # Registrar read, to answer "is this domain's delegation
+              # ours to change at all?". A domain registered AT
+              # Cloudflare has settable nameservers; one registered
+              # elsewhere does not, and no other permission changes
+              # that. Without this the probe answers 10000, which is
+              # "cannot tell" and was being read as "not ours" --
+              # exactly the empty-versus-unreadable trap this repo keeps
+              # falling into. Read only: nothing here should transfer or
+              # renew a domain.
+              ["Domain Registrar Read", "Registrar Read", "Domains Read"],
+              # "who changed this, and when". A domain that stopped
+              # working needs the moment it stopped and the change that
+              # did it, or the next outage is diagnosed from scratch --
+              # screeningstudio.com was down for a week and the estate
+              # report could only say it was down NOW.
+              ["Account Audit Logs Read", "Audit Logs Read", "Access: Audit Logs Read"],
+              # DNS write, for publishing a DMARC policy on a zone that
+              # has none. Read alone cannot close a gap it can see.
+              ["DNS Write", "DNS Edit", "DNS Records Write", "DNS Records Edit"],
+          ]
+          groups = json.load(open(sys.argv[1])).get("result") or []
+          # The whole group, not just its id: the scope decides which policy
+          # it belongs in, and a zone-scoped group in an account policy is
+          # rejected by the API.
+          by_name = {g.get("name"): g for g in groups}
+
+          # Printed whether or not the lookup succeeds. Cloudflare's
+          # spellings differ between the account table and the token
+          # responses, this catalogue is the only place they can be read
+          # from, and one run should be enough to correct the list above.
+          sys.stderr.write("email groups offered: " + (", ".join(sorted(
+              n for n in by_name if n and "Email" in n)) or "none") + "\n")
+          # Registrar and DNS, printed for the same reason as Email: the
+          # account's own catalogue is the only place these spellings can
+          # be read from, and an alias list written from memory is how
+          # `Domain Registrar Read` was asked for, not offered, and
+          # skipped in silence -- leaving the registrar question
+          # unanswered while looking like it had been asked.
+          sys.stderr.write("registrar/DNS groups offered: " + (", ".join(sorted(
+              n for n in by_name
+              if n and ("Registrar" in n or "Domain" in n or "DNS" in n
+                        or "Audit" in n or "Log" in n)))
+              or "none") + "\n")
+
+          account, zone, missing = [], [], []
+          for aliases in WANT:
+              hit = next((by_name[a] for a in aliases if a in by_name), None)
+              if not hit:
+                  missing.append(" / ".join(aliases))
+                  continue
+              (zone if any(str(s).endswith(".zone") for s in (hit.get("scopes") or []))
+               else account).append(hit.get("id"))
+          for aliases in OPTIONAL:
+              hit = next((by_name[a] for a in aliases if a in by_name), None)
+              if not hit:
+                  sys.stderr.write("optional group not offered, skipping: " + " / ".join(aliases) + "\n")
+                  continue
+              (zone if any(str(s).endswith(".zone") for s in (hit.get("scopes") or []))
+               else account).append(hit.get("id"))
+
+          if missing:
+              # Name what was actually on offer. Without it the reader knows
+              # only that a lookup failed, and the fix needs the spelling.
+              offered = sorted(n for n in by_name
+                               if n and ("D1" in n or "Workers" in n or "Email" in n))
+              sys.stderr.write(
+                  "unresolved permission groups: " + "; ".join(missing)
+                  + ". The account offers: " + (", ".join(offered) or "nothing matching")
+              )
+              sys.exit(1)
+
+          policies = [{
+              "effect": "allow",
+              "resources": {"com.cloudflare.api.account.${ACC}": "*"},
+              "permission_groups": [{"id": i} for i in account],
+          }]
+          if zone:
+              # Every zone in the account rather than a named one. The
+              # routing rules live on the zone, and naming one here would
+              # break the moment a second domain is onboarded — which is the
+              # whole point of the studio and the directory being separate.
+              #
+              # Nested under the account rather than beside it. A flat
+              # {"com.cloudflare.api.account.zone.*": "*"} is the user-token
+              # shape, and an account-owned mint refuses it with 1001 "Must
+              # specify a zone for account owned tokens, or nest zone under
+              # specific account resource". That is what this is.
+              policies.append({
+                  "effect": "allow",
+                  "resources": {
+                      "com.cloudflare.api.account.${ACC}": {
+                          "com.cloudflare.api.account.zone.*": "*",
+                      },
+                  },
+                  "permission_groups": [{"id": i} for i in zone],
+              })
+
+          print(json.dumps({"name": "${TOKEN_NAME}", "policies": policies}))
+          PY
+          ); then
+            # Emitted as an annotation rather than left on stderr. This is
+            # the likeliest real failure — an account returning a spelling
+            # neither alias covers — and a bare stderr line does not reach
+            # the run summary, so it reads as a job that died for no reason.
+            echo "::error::$(tr '\n' ' ' < /tmp/pg_err). Add the spelling it uses to WANT in this workflow."
+            exit 1
+          fi
+          # On success too, not only on failure. The catalogue is the only
+          # place the account's Email spellings can be read from, and a
+          # diagnostic that appears only when something breaks cannot be
+          # used to check the list is still right.
+          # `|| true` because a bare `[ -s f ] && echo` returns 1 on an empty
+          # file, and `set -e` would end the run on a diagnostic being absent.
+          { [ -s /tmp/pg_err ] && echo "[mint] $(tr '\n' ' ' < /tmp/pg_err)"; } || true
+          echo "[mint] D1, Workers Scripts and Email Routing permission groups resolved"
+
+          # 3. Create it. Account-owned first, because an account-owned
+          #    token outlives whoever made it. No expires_on: a TTL means
+          #    the deploy 403s at some future 3am for no visible reason.
+          VALUE=''; TID=''; OWNED=''
+          for KIND in account user; do
+            if [ "$KIND" = account ]; then URL="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens"; else URL="https://api.cloudflare.com/client/v4/user/tokens"; fi
+            RESP=$(curl -sS --max-time 20 -X POST "$URL" -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' --data "$BODY")
+            OK=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print("1" if json.load(sys.stdin).get("success") else "")' 2>/dev/null || echo '')
+            if [ -n "$OK" ]; then
+              VALUE=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["value"])')
+              TID=$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["id"])')
+              OWNED="$KIND"
+              break
+            fi
+            CODE=$(printf '%s' "$RESP" | python3 -c 'import sys,json; es=(json.load(sys.stdin).get("errors") or [{}]); print(str(es[0].get("code"))+": "+str(es[0].get("message")))' 2>/dev/null || echo '?')
+            echo "[mint] ${KIND}-owned create refused (${CODE})"
+          done
+          if [ -z "$VALUE" ]; then
+            echo "::error::Cloudflare refused to mint from this credential. Smallest fix: edit the existing CLOUDFLARE_API_TOKEN in the dashboard and add Account -> Account API Tokens -> Edit, then re-run."
+            exit 1
+          fi
+          echo "::add-mask::$VALUE"
+          echo "::add-mask::$TID"
+          echo "[mint] created ${OWNED}-owned token '${TOKEN_NAME}'"
+
+          if [ "$OWNED" = account ]; then LIST_URL="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens"; else LIST_URL="https://api.cloudflare.com/client/v4/user/tokens"; fi
+
+          revoke() {
+            if [ "$OWNED" = account ]; then U="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens/${TID}"; else U="https://api.cloudflare.com/client/v4/user/tokens/${TID}"; fi
+            curl -sS -X DELETE "$U" -H "Authorization: Bearer $TOK" >/dev/null 2>&1 || true
+            echo "[mint] revoked the minted token - it is stored nowhere, so it must not exist"
+          }
+
+          # 4. Prove it is what was asked for before anyone depends on it.
+          #
+          # Verify at the endpoint matching how it was minted. /user/tokens
+          # validates user-owned tokens only, so checking an account-owned
+          # token there reports "does not verify" for a token that is
+          # perfectly good — which then revokes it, and the mint can never
+          # succeed. Same branch as revoke(), off the same variable, for
+          # the same reason.
+          if [ "$OWNED" = account ]; then VERIFY="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens/verify"; else VERIFY="https://api.cloudflare.com/client/v4/user/tokens/verify"; fi
+          V=$(curl -sS --max-time 20 "$VERIFY" -H "Authorization: Bearer $VALUE")
+          # Say why, not just that. The first failure here reported an
+          # assertion and nothing about the response, which is the half
+          # needed to tell a wrong endpoint from a bad token.
+          if ! printf '%s' "$V" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("success"), "does not verify: " + json.dumps(d.get("errors") or d.get("messages") or d); exp=(d.get("result") or {}).get("expires_on"); assert not exp, "has an expiry of " + str(exp); print("[mint] verifies, no expiry")'; then
+            echo "::error::the ${OWNED}-owned token failed verification at ${VERIFY} - see the assertion above"
+            revoke; exit 1
+          fi
+          # What Cloudflare actually STORED, not what was asked for.
+          #
+          # Four diagnoses of this have now been wrong, every one of them
+          # inferred from a status code. The token's own record says which
+          # groups landed in which policy and against which resource, which
+          # is the fact the guessing has been standing in for. Group names
+          # and resource shapes only — no ids, no secret.
+          curl -sS --max-time 20 "$LIST_URL/$TID" -H "authorization: Bearer $TOK" \
+            | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          if not d.get("success"):
+              print("[mint] could not read the token back: " + json.dumps(d.get("errors"))[:200])
+              raise SystemExit(0)
+          for i, pol in enumerate((d.get("result") or {}).get("policies") or [], 1):
+              res = pol.get("resources") or {}
+              shape = []
+              for k, v in res.items():
+                  key = k.rsplit(".", 1)[0] + ".<id>" if "." in k else k
+                  shape.append(key + ("=" + json.dumps(v)[:60] if not isinstance(v, str) else "=*"))
+              names = sorted(g.get("name","?") for g in (pol.get("permission_groups") or []))
+              print("[mint] policy %d over %s" % (i, "; ".join(shape) or "?"))
+              for n in names:
+                  print("[mint]   " + n)
+          ' 2>/dev/null || echo "[mint] token read-back unavailable"
+
+          # Reach each binding the deploy will actually use. Retried, because
+          # a token can verify a moment before its policy is live
+          # everywhere, and a single probe would revoke a good credential
+          # over a second of propagation. The reply is reported on failure:
+          # "cannot reach D1" alone does not distinguish a missing
+          # permission from an account id that is wrong.
+          # Email Routing is probed like the other two. A token minted with
+          # a permission it cannot actually exercise is the failure this
+          # loop exists for, and the email scope is the new one, so leaving
+          # it unprobed would test everything except the part being added.
+          # ZONE is the one that mattered and was not here.
+          #
+          # This probed accounts/{acc}/email/routing/addresses and reported
+          # "can reach Email Routing: yes" — for a token that then answered
+          # 403 on zones/{zone}/email/routing, which is the call the
+          # provisioning actually makes. Email Routing has an account half
+          # (destination addresses) and a ZONE half (settings and rules),
+          # granted by different permission groups in different policies,
+          # and only the account half was ever tested. So the mint
+          # certified a credential that could not do the job and the
+          # failure surfaced two workflows later as a permissions mystery.
+          #
+          # A probe that does not exercise the call the consumer makes is
+          # not a probe.
+          ZONE_ID=$(curl -sS --max-time 20 -H "Authorization: Bearer $VALUE" \
+            "https://api.cloudflare.com/client/v4/zones?per_page=1" \
+            | python3 -c 'import sys,json; r=(json.load(sys.stdin).get("result") or [{}]); print(r[0].get("id","") if r else "")' 2>/dev/null) || ZONE_ID=''
+
+          for CHECK in "d1/database:D1" "workers/scripts:Workers" "email/routing/addresses:Email Routing (account)"; do
+            ENDPOINT="${CHECK%%:*}"; LABEL="${CHECK##*:}"
+            SEEN=no; WHY=''
+            for TRY in 1 2 3; do
+              BODY_=$(curl -sS --max-time 20 "https://api.cloudflare.com/client/v4/accounts/${ACC}/${ENDPOINT}" -H "Authorization: Bearer $VALUE" || echo '{}')
+              SEEN=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print("yes" if json.load(sys.stdin).get("success") else "no")' 2>/dev/null || echo no)
+              [ "$SEEN" = yes ] && break
+              WHY=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("errors") or [])[:300])' 2>/dev/null || echo '?')
+              [ "$TRY" -lt 3 ] && sleep 3
+            done
+            echo "[mint] can reach ${LABEL}: $SEEN"
+            if [ "$SEEN" = no ]; then
+              echo "::error::minted token cannot reach ${LABEL} after 3 tries: ${WHY}"
+              revoke; exit 1
+            fi
+          done
+
+          # The zone half, probed the way provision-email.yml calls it.
+          if [ -z "$ZONE_ID" ]; then
+            echo "::error::the token cannot list any zone, so its zone policy is missing or scoped elsewhere"
+            revoke; exit 1
+          fi
+          SEEN=no; WHY=''
+          for TRY in 1 2 3; do
+            BODY_=$(curl -sS --max-time 20 "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/email/routing" -H "Authorization: Bearer $VALUE" || echo '{}')
+            SEEN=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print("yes" if json.load(sys.stdin).get("success") else "no")' 2>/dev/null || echo no)
+            [ "$SEEN" = yes ] && break
+            WHY=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("errors") or [])[:300])' 2>/dev/null || echo '?')
+            [ "$TRY" -lt 3 ] && sleep 3
+          done
+          echo "[mint] can reach Email Routing (zone): $SEEN"
+          if [ "$SEEN" != yes ]; then
+            echo "::error::the token cannot read Email Routing on a zone: ${WHY}. The zone policy is missing or its permission groups went into the account policy. provision-email.yml makes exactly this call, so shipping this token would move the failure somewhere less obvious."
+            revoke; exit 1
+          fi
+
+          # Email SENDING on the zone, which is a different endpoint from
+          # Routing and a different permission group.
+          #
+          # This mint has asked for Email Sending Read/Write since it was
+          # written, and never once checked it. The token in use could
+          # not onboard a sending domain — `POST
+          # /zones/{id}/email/sending/subdomains` answered
+          # `Authentication error [code: 10000]` — while every probe here
+          # passed, because Routing was tested and Sending was assumed.
+          #
+          # That is the mistake this file already names one screen up: "a
+          # probe that does not exercise the call the consumer makes is
+          # not a probe". Routing receives mail; Sending is what lets the
+          # domain send any. Passing one says nothing about the other.
+          SEEN=no; WHY=''
+          for TRY in 1 2 3; do
+            BODY_=$(curl -sS --max-time 20 "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/email/sending/subdomains" -H "Authorization: Bearer $VALUE" || echo '{}')
+            SEEN=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print("yes" if json.load(sys.stdin).get("success") else "no")' 2>/dev/null || echo no)
+            [ "$SEEN" = yes ] && break
+            WHY=$(printf '%s' "$BODY_" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("errors") or [])[:300])' 2>/dev/null || echo '?')
+            [ "$TRY" -lt 3 ] && sleep 3
+          done
+          echo "[mint] can reach Email Sending (zone): $SEEN"
+          if [ "$SEEN" != yes ]; then
+            echo "::error::the token cannot reach Email Sending on a zone: ${WHY}. provision-sending-domain.yml makes exactly this call to onboard the domain mail leaves from, so shipping this token would leave that failing with the credential present and nothing looking wrong."
+            revoke; exit 1
+          fi
+
+          # 5. Hand both values to the target repo through ontold-app.
+          #    The account id goes first on purpose: it is public, so a
+          #    storage failure costs nothing, and it proves the write path
+          #    works before the token is committed to it.
+          # Keep the app script's stderr. It distinguishes "no installations
+          # visible" from "installations exist but none is this owner" from
+          # "the mint itself failed", and discarding it leaves only the fact
+          # that something returned nothing. It prints diagnostics there and
+          # the token on stdout, so this loses nothing and reveals the rest.
+          APP=$(GITHUB_ORG="$ORG" node scripts/mint_app_token.mjs 2>/tmp/app_err || true)
+          [ -s /tmp/app_err ] && echo "[store] $(tr '\n' ' ' < /tmp/app_err)"
+          if [ -z "$APP" ]; then
+            echo "::error::no ontold-app installation token for '${ORG}' - $(tr '\n' ' ' < /tmp/app_err). The app must be installed on that account with Secrets: read and write on ${TARGET}."
+            revoke; exit 1
+          fi
+          echo "::add-mask::$APP"
+          if ! GH_TOKEN="$APP" gh api "repos/${TARGET}" --jq .full_name >/dev/null 2>&1; then
+            echo "::error::${TARGET} is not visible to the ontold-app installation on '${ORG}'"
+            revoke; exit 1
+          fi
+          if ! GH_TOKEN="$APP" gh secret set CLOUDFLARE_ACCOUNT_ID --repo "$TARGET" --body "$ACC" 2>/tmp/gherr; then
+            echo "::error::cannot write secrets to ${TARGET}: $(head -c 200 /tmp/gherr). The app needs Secrets: read and write there. Nothing secret was sent."
+            revoke; exit 1
+          fi
+          echo "[store] CLOUDFLARE_ACCOUNT_ID set on ${TARGET}"
+          if ! GH_TOKEN="$APP" gh secret set "$SECRET_NAME" --repo "$TARGET" --body "$VALUE" 2>/tmp/gherr; then
+            echo "::error::account id stored but the token would not: $(head -c 200 /tmp/gherr)"
+            revoke; exit 1
+          fi
+          # 5. Retire the predecessors.
+          #
+          # This minted a new token every run and never removed the old
+          # one, so the account accumulated four
+          # identically-named deploy tokens in twelve days. That is not untidy, it
+          # is a real problem: every one of them still works, nothing says
+          # which is live, and revoking the wrong one during an incident
+          # takes the site down. The oldest carried D1 rights only, was
+          # indistinguishable by name from the newest, and is exactly the
+          # kind of thing that gets picked by accident.
+          #
+          # Only tokens with THIS name, only ones older than the one just
+          # stored, and only after the new one is verified AND written to
+          # the target repo — so a failure anywhere above leaves every old
+          # credential intact. Never the token authenticating this call.
+          # Full URL, like every other call in this file. CF_API is
+          # the sibling repo's convention and does not exist here; under set -u
+          # that killed the run AFTER the new token was minted, verified
+          # and stored. Safe — nothing was revoked, which is the ordering
+          # working — but the run went red on a variable name.
+          if [ "$OWNED" = account ]; then LIST="https://api.cloudflare.com/client/v4/accounts/${ACC}/tokens"; else LIST="https://api.cloudflare.com/client/v4/user/tokens"; fi
+          OLD=$(curl -sS --max-time 20 "$LIST?per_page=100" -H "authorization: Bearer $TOK" \
+            | TID="$TID" TOKEN_NAME="$TOKEN_NAME" python3 -c '
+          import json, sys, os
+          keep = os.environ["TID"]
+          name = os.environ["TOKEN_NAME"]
+          rows = (json.load(sys.stdin).get("result") or [])
+          print(" ".join(
+              r["id"] for r in rows
+              if r.get("name") == name and r.get("id") != keep
+          ))' 2>/dev/null) || OLD=''
+
+          # Nothing below may fail the run. By this point the new token is
+          # minted, verified and written to the target repo — the job has
+          # already succeeded at everything that matters, and a red run
+          # here would say otherwise. Leftover tokens are a warning.
+          set +e
+          RETIRED=0
+          for ID in ${OLD:-}; do
+            if curl -sS --max-time 20 -X DELETE "$LIST/$ID" -H "authorization: Bearer $TOK" \
+              | jq -e '.success' >/dev/null 2>&1; then
+              RETIRED=$((RETIRED + 1))
+            else
+              echo "::warning::could not revoke a previous ${TOKEN_NAME} token; revoke it by hand"
+            fi
+          done
+          [ "$RETIRED" = 0 ] || echo "::notice::revoked ${RETIRED} previous ${TOKEN_NAME} token(s)"
+          set -e
+
+          # Says what was actually minted. It read "D1 and Workers Scripts"
+          # for one run after email was added, which is how a stale comment
+          # outlives the thing it described and then gets believed.
+          echo "::notice::${TARGET} now holds CLOUDFLARE_ACCOUNT_ID and, as ${SECRET_NAME}, a ${TOKEN_NAME} token scoped to D1, Workers Scripts, Email Routing and Email Sending, read and write, no expiry. Its own provisioning workflows can now run. Any secrets the Worker itself reads are separate and still need setting."

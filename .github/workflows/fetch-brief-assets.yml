@@ -1,0 +1,126 @@
+# Put a brief's reference assets in R2.
+#
+# Founder: *"fetch them! we have r2 storage on cf"*. The Suite Dreams
+# pack is 47 photographs, both end cards and the four partners' logos —
+# 23MB. We built the film from eight of them, because eight is what was
+# in the repository.
+#
+# The list is NOT typed here. Every address comes from the link section
+# of api/_briefs/_sources/<slug>*.md, captured by fetch_brief_source.py
+# from the host's own pages, and anything not on that list is not
+# fetched. Founder, earlier: *"we need to be careful about the urls"*.
+#
+# The media goes to R2 and the MANIFEST is committed. Forty photographs
+# we did not make do not belong in git; an index of where they are does.
+#
+#   echo '{"slug":"suite-dreams"}' \
+#     > .github/dispatch-requests/fetch-brief-assets.json
+
+name: fetch-brief-assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: 'Brief slug — assets come from its captured link list'
+        required: false
+        default: 'suite-dreams'
+  push:
+    paths:
+      - '.github/dispatch-requests/fetch-brief-assets.json'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-brief-assets
+  cancel-in-progress: false
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      GITHUB_ORG: raineydavid
+      STUDIO_REPO: raineydavid/screening
+      # inputs is empty on a push, so the default lives here too.
+      STUDIO_BRANCH: ${{ inputs.branch || 'claude/lead-magnet-m2lxny' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      R2_BUCKET: ontold-public
+      R2_PUBLIC_BASE_RAW: ${{ secrets.R2_PUBLIC_BASE || secrets.R2_PUBLIC_URL || secrets.CLOUDFLARE_R2_PUBLIC_URL }}
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_JURISDICTION: ${{ secrets.R2_JURISDICTION }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Fetch them and host them
+        env:
+          ASSET_SLUG: ${{ inputs.slug || 'suite-dreams' }}
+        run: |
+          set -euo pipefail
+
+          for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::${v} is missing, so nothing can be hosted."
+              exit 1
+            fi
+          done
+
+          ACC=$(printf '%s' "${R2_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -z "$ACC" ] && { echo "::error::no 32-character account id inside R2_ACCOUNT_ID"; exit 1; }
+          echo "::add-mask::$ACC"
+
+          # The configured base has historically held the S3 endpoint,
+          # which answers 400 to a browser. Ask Cloudflare for the
+          # bucket's managed domain rather than trusting the secret.
+          BASE=""
+          case "${R2_PUBLIC_BASE_RAW:-}" in
+            *r2.cloudflarestorage.com*|"") : ;;
+            *) BASE="${R2_PUBLIC_BASE_RAW%/}" ;;
+          esac
+          if [ -z "$BASE" ]; then
+            [ -z "${CF_API_TOKEN:-}" ] && { echo "::error::no public domain configured and no CLOUDFLARE_API_TOKEN to resolve one."; exit 1; }
+            JUR=()
+            [ -n "${R2_JURISDICTION:-}" ] && JUR=(-H "cf-r2-jurisdiction: ${R2_JURISDICTION}")
+            API="https://api.cloudflare.com/client/v4/accounts/${ACC}/r2/buckets/ontold-public/domains/managed"
+            RESP=$(curl -sS -X PUT "$API" -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" "${JUR[@]}" --data '{"enabled":true}' || true)
+            DOMAIN=$(printf '%s' "$RESP" | sed -nE 's/.*"domain":"([^"]+)".*/\1/p' | head -1)
+            [ -z "$DOMAIN" ] && { echo "::error::could not resolve a public domain: $(printf '%s' "$RESP" | head -c 300)"; exit 1; }
+            BASE="https://${DOMAIN}"
+          fi
+          export R2_PUBLIC_BASE="$BASE"
+          echo "::notice::serving from ${BASE}"
+
+          {
+            echo "### brief assets · ${ASSET_SLUG}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          node scripts/fetch_brief_assets.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          RC=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $RC
+
+      - name: Commit the manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/_briefs/_sources
+          if git diff --cached --quiet; then
+            echo "the asset manifest is unchanged"
+          else
+            git commit -m "brief assets: ${{ inputs.slug || 'suite-dreams' }} (run ${{ github.run_id }})"
+            bash scripts/git_push_retry.sh
+          fi

@@ -1,0 +1,204 @@
+# Onboard the domain we send from, so that sending works at all.
+#
+# Every send was refused `could not find domain config of sending
+# domain`, and this was written down as a dashboard step somebody else
+# had to do. It is not: `wrangler email sending enable` onboards a zone
+# or subdomain from a runner, with the Cloudflare token this repository
+# already holds. Cloudflare writes the DKIM, SPF and bounce records
+# itself.
+#
+# ## The domain is READ, never typed
+#
+# The sending domain and the From address are ONE decision — set one
+# without the other and every send is refused with the credential
+# present and the DNS looking correct. That has now happened twice here,
+# once with `mail.` in the code against a zone with nothing onboarded,
+# and once against an apex whose DKIM key turned out to be another
+# provider's.
+#
+# So this onboards whatever `workers/mcp/wrangler.toml` says the Worker
+# sends as, derived through api/_mail. A test already pins those two
+# together, which makes it impossible for this workflow to onboard a
+# domain the Worker will not use.
+#
+# ## Safe to re-run
+#
+# It asks what is already enabled and skips when the domain is there.
+# Nothing is disabled, ever — that is a live-mail decision and it does
+# not belong in an automated provisioning run.
+#
+# ## One domain, or every zone
+#
+# By default this onboards the one subdomain the Worker sends from. With
+# `{"scope":"account"}` in the request file it onboards `<prefix>.<zone>`
+# for every zone in the Cloudflare account, using the same zone list the
+# estate report reads.
+#
+# Onboarding displaces nothing: the sending subdomain is new, and its
+# DKIM, SPF and bounce records sit beside whatever the apex already has.
+# That is what makes the estate-wide form safe where the ROUTING one
+# needs an MX guard.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/provision-sending-domain.json
+#   echo '{"why":"...","scope":"account"}' > ...   # every zone
+
+name: provision-sending-domain
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/provision-sending-domain.json'
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'account = every zone; domain = the Worker'
+        type: choice
+        options: [domain, account]
+        default: domain
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-sending-domain
+  cancel-in-progress: false
+
+jobs:
+  onboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # The purpose-scoped email credential when it exists, the deploy
+      # one otherwise. Preferring rather than replacing:
+      # CLOUDFLARE_API_TOKEN carries R2 and Workers Routes, which the
+      # email token deliberately does not, so these must never become
+      # the same secret.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+      RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - uses: actions/setup-python@v6
+
+      - name: Install
+        run: npm ci
+
+      - name: Resolve account id
+        id: preflight
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      # From the Worker's own MAIL_FROM, not from a value typed here.
+      - name: Which domain do we send from?
+        id: domain
+        run: |
+          set -euo pipefail
+          DOMAIN=$(python3 -c 'from api._mail import DEFAULT_MAIL_FROM, sending_domain; print(sending_domain(DEFAULT_MAIL_FROM))')
+          case "$DOMAIN" in
+            *.*) : ;;
+            *) echo "::error::'$DOMAIN' is not a domain — MAIL_FROM is malformed"; exit 1 ;;
+          esac
+          echo "[send] the Worker sends from $DOMAIN"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      # One domain, or `<prefix>.<zone>` for every zone in the account.
+      # The zone list is the one the estate report reads, so a domain
+      # cannot be provisioned here and missing from the report.
+      - name: Which domains
+        id: targets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          REQ: .github/dispatch-requests/provision-sending-domain.json
+          DISPATCH_SCOPE: ${{ inputs.scope }}
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+        run: |
+          set -euo pipefail
+          SCOPE="${DISPATCH_SCOPE:-domain}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            SCOPE=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("scope") or "domain"))' "$REQ")
+          fi
+          if [ "$SCOPE" = "account" ]; then
+            # The PREFIX, not the domain: `mail.ontold.site` -> `mail`,
+            # applied to every zone. The same arrangement everywhere.
+            PREFIX="${DOMAIN%%.*}"
+            python3 scripts/mail_estate.py --names | sed "s/^/${PREFIX}./" > /tmp/domains.txt
+          else
+            printf '%s\n' "$DOMAIN" > /tmp/domains.txt
+          fi
+          echo "[send] scope=$SCOPE, $(wc -l < /tmp/domains.txt) domain(s)"
+          cat /tmp/domains.txt
+
+      - name: Onboard them, skipping any already done
+        id: enable
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          # `+e` on purpose: steps run under `bash -e`, and one domain
+          # Cloudflare refuses must not end the run before the rest are
+          # attempted. The worst exit code is carried out at the end.
+          set +e
+          set -uo pipefail
+          npx wrangler@4 email sending list > /tmp/list.out 2>&1 || true
+          echo "::group::already enabled"; cat /tmp/list.out; echo "::endgroup::"
+          WORST=0
+          while read -r DOMAIN; do
+            [ -z "$DOMAIN" ] && continue
+            if grep -qF "$DOMAIN" /tmp/list.out; then
+              echo "[send] ${DOMAIN} already onboarded"
+              continue
+            fi
+            if npx wrangler@4 email sending enable "$DOMAIN" > /tmp/enable.out 2>&1; then
+              echo "[send] ${DOMAIN} onboarded — Cloudflare writes its own DKIM, SPF and bounce records"
+            else
+              WORST=1
+              # Every domain is attempted. One refusal must not hide the
+              # state of the rest, which is the point of doing these
+              # together.
+              if grep -q '10000' /tmp/enable.out; then
+                echo "::error::${DOMAIN} NOT onboarded: the token cannot reach the sending API (Authentication error 10000) — a missing permission group, nothing to do with the domain."
+              else
+                echo "::error::could not onboard ${DOMAIN}: $(tr '\n' ' ' < /tmp/enable.out | tail -c 200)"
+              fi
+            fi
+          done < /tmp/domains.txt
+          echo "state=$([ "$WORST" = 0 ] && echo done || echo partial)" >> "$GITHUB_OUTPUT"
+          exit $WORST
+
+      # What Cloudflare thinks, and then what the ZONE says. Both,
+      # because a settings call reporting success while the DKIM record
+      # is not written is the state that reads as ready and sends
+      # nothing — and that is the failure this whole thread has been.
+      - name: Say what is true now
+        if: always()
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+        run: |
+          set -uo pipefail
+          {
+            echo "### Sending domain"
+            echo ""
+            echo "The Worker sends from \`$DOMAIN\` (read from wrangler.toml)."
+            echo ""
+            echo '```'
+            npx wrangler@4 email sending settings "$DOMAIN" 2>&1 | tail -20 || true
+            echo '```'
+            echo '```'
+            # The zone's own DNS, which is the fact rather than the
+            # claim. Only a cf2024-* selector means Cloudflare can sign.
+            python3 scripts/sending_domains.py "${DOMAIN#*.}" 2>&1 || true
+            echo '```'
+            echo ""
+            echo "Next: push \`.github/dispatch-requests/send-test-email.json\` to prove a send."
+          } >> "$GITHUB_STEP_SUMMARY"

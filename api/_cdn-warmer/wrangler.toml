@@ -1,0 +1,48 @@
+# api/_cdn-warmer/wrangler.toml — Cloudflare Worker config for the
+# augmented CDN warmer + hit recorder + predictor.
+
+name                = "ontold-cdn-warmer"
+main                = "src/warmer.ts"
+compatibility_date  = "2026-06-01"
+workers_dev         = true       # *.workers.dev URL for testing
+
+# ─── Bindings ────────────────────────────────────────────────────
+# WARM_LOG: per (assetId, kind) last-warmed timestamps. Powers
+# hysteresis — the predictor refuses to re-warm an entry within
+# HYSTERESIS_MS of the last successful warm.
+[[kv_namespaces]]
+binding = "WARM_LOG"
+id      = "REPLACE_WITH_KV_ID_FROM_WRANGLER_KV_CREATE"
+
+# HIT_LOG: per (assetId, kind, hourBucket) request counters fed by
+# POST /record-hit. The predictor aggregates these every cron tick
+# to discover assets that warrant a warm beyond CANONICAL.json.
+# 2h TTL — older buckets aren't relevant for "is this hot right
+# now?" decisions and KV writes are the dominant free-tier cost.
+[[kv_namespaces]]
+binding = "HIT_LOG"
+id      = "REPLACE_WITH_KV_ID_FROM_WRANGLER_KV_CREATE"
+
+# DERIVE_LOG: tracks the BatchProvider render pipeline. Host POSTs
+# /derive-variant on render request; GPU worker POSTs /derive-result
+# on completion; the cron tick scans for status='done' records and
+# warms each output to the right regions. 7-day TTL — derives are
+# reference data, the underlying R2 object persists longer.
+[[kv_namespaces]]
+binding = "DERIVE_LOG"
+id      = "REPLACE_WITH_KV_ID_FROM_WRANGLER_KV_CREATE"
+
+# ─── Vars (non-secret) ───────────────────────────────────────────
+# The origin Cloudflare's CDN fronts. Warm requests hit this URL so
+# they populate the PoP cache as if they were a real user request.
+# Override via `wrangler deploy --var ORIGIN_BASE_URL=https://...`
+# for preview deploys.
+[vars]
+ORIGIN_BASE_URL = "https://ontold.com"
+
+# ─── Cron triggers ───────────────────────────────────────────────
+# Every 10 minutes. Cron precision is per-minute on Cloudflare's
+# scheduler; the Worker enforces a soft cap on jobs-per-tick so a
+# clock skew can't fan us out.
+[triggers]
+crons = ["*/10 * * * *"]

@@ -1,0 +1,20 @@
+{
+  "_comment": "Always-warm content ids. The cron warmer fires HEAD requests for each (id, kind) pair so Cloudflare's edge cache stays populated. Keep this list short — only assets that should NEVER cold-start. Tune from analytics later.",
+  "_kinds": "kind values: 'video' (the canonical bytes), 'thumbnail' (the card preview), 'captions' (the WebVTT track for films). Match the kind param api/watch.py accepts.",
+
+  "items": [
+    { "id": "lighthouse-keeper-1",  "kind": "thumbnail", "note": "Hero film card on home" },
+    { "id": "lighthouse-keeper-1",  "kind": "video",     "note": "Hero film bytes" },
+    { "id": "lighthouse-keeper-1",  "kind": "captions",  "note": "Hero film captions" },
+    { "id": "hero-demo-1",          "kind": "video",     "note": "Fallback hero video (Date Night)" },
+    { "id": "hero-demo-1",          "kind": "thumbnail", "note": "Fallback hero thumbnail" },
+
+    { "id": "ada-portrait",         "kind": "video",     "note": "Ada portrait (kind=video is the canonical key)" },
+    { "id": "jonah-portrait",       "kind": "video",     "note": "Jonah portrait" },
+
+    { "id": "ai-gent-source",       "kind": "video",     "note": "AI-GENT source image" },
+    { "id": "ai-gentics-architect", "kind": "video",     "note": "AI-GENT remix #1" },
+    { "id": "ai-gentics-atelier",   "kind": "video",     "note": "AI-GENT remix #2" },
+    { "id": "ai-gentics-steampunk", "kind": "video",     "note": "AI-GENT remix #3" }
+  ]
+}

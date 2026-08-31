@@ -1,0 +1,123 @@
+# Who changed a domain, and when.
+#
+# Founder: *"but it was working previously — screening studio was live,
+# emails were being received, who changed it. we need audit logs"*.
+#
+# The right question, and nothing here could answer it. mail-estate.yml
+# says what is true NOW. A domain that stopped working needs the moment
+# it stopped and the change that did it, or the next outage gets
+# diagnosed from scratch — which is what happened: screeningstudio.com
+# was dark for a week while a daily check reported it, and reconstructing
+# why took most of a day of inference.
+#
+# ## What it is looking for on this occasion
+#
+# screeningstudio.com is delegated to `rick`/`becky.ns.cloudflare.com`
+# while Cloudflare has the zone assigned `camilo`/`delilah`. The
+# delegation was presumably right once, so the ASSIGNMENT moved
+# underneath it — and a Cloudflare zone keeps its nameservers for life
+# with one exception: delete it and re-add it and it draws a new pair,
+# with the registrar never told. A `zone.delete` followed by a
+# `zone.create` is the shape. The script does not assume it; it prints
+# what the log says.
+#
+# ## Addresses are masked
+#
+# An actor is a colleague. The initial and the shape distinguish one
+# person from another and a person from an automation, which is what the
+# question needs, and the unmasked value is in the dashboard for whoever
+# has to act on it. This output goes to a CI log.
+#
+#   echo '{"domain":"example.com","days":180}' \
+#     > .github/dispatch-requests/audit-zone.json
+
+name: audit-zone
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/audit-zone.json'
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Domain to trace'
+        required: true
+      days:
+        description: 'How far back'
+        default: '90'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-zone
+  cancel-in-progress: false
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      - name: Resolve account id
+        id: preflight
+        env:
+          RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id available."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Which domain, and how far back
+        id: what
+        env:
+          REQ: .github/dispatch-requests/audit-zone.json
+          IN_DOMAIN: ${{ inputs.domain }}
+          IN_DAYS: ${{ inputs.days }}
+        run: |
+          set -euo pipefail
+          DOMAIN="${IN_DOMAIN:-}"
+          DAYS="${IN_DAYS:-90}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            DOMAIN=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("domain",""))' "$REQ")
+            DAYS=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("days",90))' "$REQ")
+          fi
+          if [ -z "$DOMAIN" ]; then
+            echo "::error::no domain. Put {\"domain\":\"example.com\"} in $REQ."
+            exit 1
+          fi
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "days=$DAYS" >> "$GITHUB_OUTPUT"
+
+      - name: What the audit log says
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          # +e first: the script exits non-zero when the log cannot be
+          # read, and the summary below is the part worth having.
+          set +e
+          set -o pipefail
+          {
+            echo "### Audited changes touching ${{ steps.what.outputs.domain }}"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/audit_zone.py "${{ steps.what.outputs.domain }}" \
+            --days "${{ steps.what.outputs.days }}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          RC=$?
+          {
+            echo '```'
+            echo ""
+            echo "A registrar is a separate system with its own history. If the"
+            echo "delegation changed rather than the zone, the record of it is there,"
+            echo "not here."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

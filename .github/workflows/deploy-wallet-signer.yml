@@ -1,0 +1,84 @@
+name: Deploy wallet signer
+
+# Deploys the stablecoin wallet's signing worker to Cloudflare on any
+# push touching it. The worker is INERT until its secrets exist —
+# without WALLET_PRIVATE_KEY / SIGNER_AUTH it answers 503 and signs
+# nothing — so auto-deploy is safe; arming it is a human act:
+#   1. cd workers/wallet-signer && npm install && node generate.mjs
+#   2. store the printed key as repo secret WALLET_PRIVATE_KEY,
+#      pick a strong SIGNER_AUTH, add both here as repo secrets
+#      (this workflow pushes them to the worker), fund the address
+#      with USDC (base-sepolia faucet first)
+#   3. WorkAIs Vercel env: SPEND_SIGNER_URL + SPEND_SIGNER_AUTH
+
+on:
+  push:
+    paths:
+      - 'workers/wallet-signer/**'
+      - '.github/workflows/deploy-wallet-signer.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+      # These tests are excluded from the root vitest suite because viem
+      # only exists inside this directory. Running them here, after the
+      # install, keeps the signer covered without asking the root CI to
+      # resolve a dependency it does not have.
+      - name: Unit tests (signer)
+        working-directory: workers/wallet-signer
+        run: |
+          npm install --no-audit --no-fund
+          npx vitest run
+
+      # Extract the account id rather than trusting the secret verbatim
+      # — the same preflight deploy-site-host.yml has always run. That
+      # step exists because the raw secret is NOT a bare id (it has
+      # carried surrounding text/whitespace), and wrangler given a
+      # malformed id builds /accounts/<garbage>/workers/services/… and
+      # gets Cloudflare 7003 "perhaps your object identifier is
+      # invalid" + 7000 "No route for that URI" — which reads like a
+      # missing Worker and is actually a bad account id. wrangler
+      # CREATES a Worker that does not exist, so "not found" was never
+      # the real story.
+      - name: Resolve account id
+        id: preflight
+        env:
+          RAW_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || secrets.R2_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in CLOUDFLARE_ACCOUNT_ID / R2_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy worker
+        working-directory: workers/wallet-signer
+        env:
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          npm install --no-audit --no-fund
+          npx wrangler@4 deploy
+
+      - name: Push worker secrets (only those present in repo secrets)
+        working-directory: workers/wallet-signer
+        env:
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          WALLET_PRIVATE_KEY: ${{ secrets.WALLET_PRIVATE_KEY }}
+          WALLET_MASTER_SEED: ${{ secrets.WALLET_MASTER_SEED }}
+          SIGNER_AUTH:        ${{ secrets.SIGNER_AUTH }}
+        run: |
+          if [ -n "$WALLET_PRIVATE_KEY" ]; then printf '%s' "$WALLET_PRIVATE_KEY" | npx wrangler@4 secret put WALLET_PRIVATE_KEY; fi
+          if [ -n "$WALLET_MASTER_SEED" ]; then printf '%s' "$WALLET_MASTER_SEED" | npx wrangler@4 secret put WALLET_MASTER_SEED; fi
+          if [ -n "$SIGNER_AUTH" ]; then printf '%s' "$SIGNER_AUTH" | npx wrangler@4 secret put SIGNER_AUTH; fi
+          if [ -z "$WALLET_PRIVATE_KEY" ] && [ -z "$WALLET_MASTER_SEED" ]; then echo "::notice::no wallet secrets set — worker deployed but inert (503) until armed."; fi

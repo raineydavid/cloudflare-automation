@@ -1,0 +1,217 @@
+# Deploy the Ontold MCP Worker, then prove it speaks MCP.
+#
+# The surface used to live inside api/status.py on Vercel (issue #116).
+# It moved because publish had to present a bearer to our OWN site-host
+# Worker over the public internet to write an object we own, and because
+# Vercel's Hobby tier caps a deployment at 12 serverless functions —
+# eight were used, and /mcp was riding inside status.py to avoid a ninth.
+#
+# The push-path trigger is deliberate and load-bearing. workflow_dispatch
+# is 403 for the agent integration, so a push to workers/mcp/** is the
+# only way an agent can get this to run at all. Same reason check-keys
+# and fetch-repo carry one.
+#
+# Vercel's /mcp keeps serving until this is verified live. Two endpoints
+# answering the same protocol is fine; a gap between them is not.
+
+name: deploy-mcp
+
+on:
+  push:
+    paths:
+      - 'workers/mcp/**'
+      - '.github/workflows/deploy-mcp.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-mcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Same fallback chain as deploy-site-host / provision-r2 — the
+      # account id has only ever been reliably present as R2_ACCOUNT_ID.
+      RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # The contract tests, before anything is deployed. These are the
+      # port's whole safety argument — 39 assertions carried over from
+      # api/test_mcp.py, most of them refusals. A tool that used to say
+      # no and now says yes fails silently and either costs money or
+      # publishes over a live page.
+      - name: Contract tests
+        run: npx vitest run workers/mcp/mcp.test.mjs
+
+      - name: Resolve account id
+        id: preflight
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      # The deployed URL comes from wrangler's own output, not from
+      # reconstructing it. The first version of this workflow guessed it
+      # via `wrangler subdomain get`, which printed nothing usable, so
+      # the verify step probed `ontold-mcp.workers.dev` — a host that
+      # does not exist — and failed a deploy that had in fact succeeded.
+      # wrangler prints the real address on the line after "Deployed";
+      # read that.
+      # The Worker route only fires if DNS resolves through Cloudflare.
+      # 192.0.2.1 (TEST-NET) proxied is the standard workers-only record
+      # — the same pattern deploy-site-host.yml uses for *.ontold.site.
+      # A warning rather than a failure: the workers.dev address still
+      # serves, so a missing DNS record degrades the address, not the
+      # deploy.
+      - name: Ensure mcp.ontold.site resolves
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(printf '%s' "${CF_API_TOKEN:-}" | tr -d '[:space:]')
+          if [ -z "$TOKEN" ]; then echo "::warning::no API token — skipping DNS"; exit 0; fi
+          ZONE_ID=$(curl -sS "https://api.cloudflare.com/client/v4/zones?name=ontold.site" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python3 -c 'import sys,json; r=json.load(sys.stdin).get("result") or [{}]; print(r[0].get("id",""))')
+          if [ -z "$ZONE_ID" ]; then echo "::warning::ontold.site zone not visible to this token"; exit 0; fi
+
+          existing=$(curl -sS "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=A&name=mcp.ontold.site" \
+            -H "Authorization: Bearer ${TOKEN}")
+          if printf '%s' "$existing" | python3 -c 'import sys,json; sys.exit(0 if (json.load(sys.stdin).get("result") or []) else 1)' 2>/dev/null; then
+            echo "::notice::mcp.ontold.site already resolves — ok"; exit 0
+          fi
+          resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+            --data '{"type":"A","name":"mcp","content":"192.0.2.1","proxied":true,"comment":"ontold-mcp worker route target"}')
+          if printf '%s' "$resp" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") else 1)' 2>/dev/null; then
+            echo "::notice::created proxied A record for mcp.ontold.site"
+          else
+            echo "::warning::could not create mcp.ontold.site ($(printf '%s' "$resp" | tr -d '\n' | cut -c1-200)) — the workers.dev address still serves"
+          fi
+
+      - name: Deploy Worker
+        id: deploy
+        working-directory: workers/mcp
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -euo pipefail
+          npx wrangler@4 deploy 2>&1 | tee /tmp/deploy.log
+          # A custom route DISABLES workers.dev — wrangler says so in the
+          # output. The first version of this grepped only for a
+          # workers.dev URL and so failed the moment the route landed,
+          # which is the same mistake twice: deciding what the address
+          # should look like instead of reading what wrangler printed.
+          # Route line looks like:  mcp.ontold.site/* (zone name: ...)
+          ROUTE=$(grep -oE '^[[:space:]]+[a-z0-9.-]+\.[a-z]{2,}/\*' /tmp/deploy.log \
+                  | head -1 | tr -d '[:space:]' | sed 's#/\*$##' || true)
+          WDEV=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' /tmp/deploy.log | head -1 || true)
+          URL="${ROUTE:+https://$ROUTE}"
+          URL="${URL:-$WDEV}"
+          if [ -z "$URL" ]; then
+            echo "::error::deploy printed neither a route nor a workers.dev URL — see the log above"
+            exit 1
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::deployed to $URL"
+
+      # Secrets go on AFTER the first deploy, because `wrangler secret
+      # put` needs the script to exist. Each one is optional and says
+      # what stays switched off without it, rather than failing the
+      # whole run — a Worker that serves capabilities and compose is
+      # still useful while generation is unwired.
+      - name: Push secrets
+        working-directory: workers/mcp
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
+          ROOT_SECRET: ${{ secrets.ROOT_SECRET }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          put() {
+            if [ -n "${2:-}" ]; then
+              printf '%s' "$2" | npx wrangler@4 secret put "$1"
+              echo "::notice::$1 set"
+            else
+              echo "::warning::$1 not set — $3"
+            fi
+          }
+          put MCP_TOKEN   "${MCP_TOKEN:-}"   "the surface is OPEN (no bearer required) and generate/publish stay off unless ROOT_SECRET is set"
+          put ROOT_SECRET "${ROOT_SECRET:-}" "per-tool tokens cannot be derived"
+          put GH_PAT             "${GH_PAT:-}"             "generate cannot queue a render (needs actions:write on this repo)"
+
+      # Ask the deployed Worker what it is. A deploy that succeeds and
+      # serves nothing is the failure this catches — and it is the one
+      # that hid for weeks the last time something was shipped without
+      # being driven.
+      - name: Verify it speaks MCP
+        env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
+        run: |
+          set -uo pipefail
+          URL="${{ steps.deploy.outputs.url }}/mcp"
+          echo "probing $URL"
+          AUTH=()
+          [ -n "${MCP_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer ${MCP_TOKEN}")
+
+          # A freshly created proxied A record needs a moment for DNS and
+          # the edge certificate. Retry before concluding anything.
+          BODY=""; RC=0
+          for attempt in 1 2 3 4 5 6; do
+            BODY=$(curl -sS --max-time 20 -X POST "$URL" "${AUTH[@]}" \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>&1) && { RC=0; break; }
+            RC=$?
+            echo "attempt ${attempt}: curl exit ${RC}"
+            sleep 10
+          done
+
+          # Distinguish "the address is not live YET" from "the server is
+          # wrong". curl 6 is DNS resolution and 35/60 are TLS — all
+          # transient on a first deploy and none of them evidence about
+          # what the Worker serves. Anything else, or a bad body, is a
+          # real failure and must not be softened: the entire point of
+          # this step is catching a deploy that succeeds and serves
+          # nothing.
+          if [ "$RC" -ne 0 ]; then
+            case "$RC" in
+              6|35|60)
+                echo "::warning::$URL is not resolving yet (curl $RC) — the Worker deployed, the address has not propagated. Re-run this workflow in a few minutes to verify."
+                exit 0 ;;
+              *)
+                echo "::error::probe failed (curl $RC): $BODY"
+                exit 1 ;;
+            esac
+          fi
+          echo "$BODY" | head -c 2000; echo
+
+          for tool in capabilities compose generate status publish roster mint_worker; do
+            printf '%s' "$BODY" | grep -q "\"$tool\"" || { echo "::error::$tool missing from tools/list"; exit 1; }
+          done
+          if printf '%s' "$BODY" | grep -qi "list.\?templates"; then
+            echo "::error::the template catalogue is reachable from MCP — that is the IP boundary"
+            exit 1
+          fi
+          echo "::notice::MCP live at $URL with all seven tools, no catalogue exposure"

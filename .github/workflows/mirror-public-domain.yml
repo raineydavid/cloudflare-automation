@@ -1,0 +1,172 @@
+# Host Screening Studio's public domain reel here, where the R2 keys are.
+#
+# The studio was pointing a <video> tag at 200MB+ archive.org originals,
+# which 500s in the browser. It only plays each film's opening three
+# minutes, so we cut that and serve it from ontold-public — same reason
+# mint-audience-images lives here rather than the Runware key moving out.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/mirror-public-domain.json
+
+name: mirror-public-domain
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch of the studio repo to mirror into.'
+        required: false
+        default: 'claude/lead-magnet-m2lxny'
+  push:
+    paths:
+      - '.github/dispatch-requests/mirror-public-domain.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-public-domain
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      GITHUB_ORG: raineydavid
+      STUDIO_REPO: raineydavid/screening
+      # inputs is empty on a push, so the default lives here too.
+      STUDIO_BRANCH: ${{ inputs.branch || 'claude/lead-magnet-m2lxny' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      R2_BUCKET: ontold-public
+      R2_PUBLIC_BASE_RAW: ${{ secrets.R2_PUBLIC_BASE || secrets.R2_PUBLIC_URL || secrets.CLOUDFLARE_R2_PUBLIC_URL }}
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_JURISDICTION: ${{ secrets.R2_JURISDICTION }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      # Not on the runner image; every other film workflow here installs it.
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
+      - name: Cut the excerpts, host them, push the URLs back
+        run: |
+          set -euo pipefail
+
+          for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::${v} is missing, so nothing can be hosted. The studio keeps streaming from archive.org."
+              exit 1
+            fi
+          done
+
+          ACC=$(printf '%s' "${R2_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -z "$ACC" ] && { echo "::error::no 32-character account id inside R2_ACCOUNT_ID"; exit 1; }
+          echo "::add-mask::$ACC"
+
+          # R2_PUBLIC_BASE holds the S3 API endpoint, which answers 400 to an
+          # unauthenticated GET - objects written under it are unreadable by a
+          # browser. The bucket's managed domain is the address that serves,
+          # so ask Cloudflare for it rather than trusting the secret.
+          BASE=""
+          case "${R2_PUBLIC_BASE_RAW:-}" in
+            *r2.cloudflarestorage.com*|"")
+              echo "::notice::resolving ontold-public's managed domain (the configured base is the S3 endpoint)" ;;
+            *) BASE="${R2_PUBLIC_BASE_RAW%/}" ;;
+          esac
+
+          if [ -z "$BASE" ]; then
+            [ -z "${CF_API_TOKEN:-}" ] && { echo "::error::no public domain configured and no CLOUDFLARE_API_TOKEN to resolve one. Enable the r2.dev URL on ontold-public and set R2_PUBLIC_BASE."; exit 1; }
+            JUR=()
+            [ -n "${R2_JURISDICTION:-}" ] && JUR=(-H "cf-r2-jurisdiction: ${R2_JURISDICTION}")
+            API="https://api.cloudflare.com/client/v4/accounts/${ACC}/r2/buckets/ontold-public/domains/managed"
+            RESP=$(curl -sS -X PUT "$API" \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JUR[@]}" --data '{"enabled":true}' || true)
+            DOMAIN=$(printf '%s' "$RESP" | sed -nE 's/.*"domain":"([^"]+)".*/\1/p' | head -1)
+            if [ -z "$DOMAIN" ]; then
+              echo "::error::could not resolve a public domain for ontold-public: $(printf '%s' "$RESP" | head -c 300)"
+              exit 1
+            fi
+            BASE="https://${DOMAIN}"
+            echo "::notice::serving from ${BASE}"
+          fi
+          export R2_PUBLIC_BASE="$BASE"
+
+          APP=$(node scripts/mint_app_token.mjs 2>/tmp/app_err || true)
+          if [ -z "${APP}" ]; then
+            echo "::error::no ontold-app token for '${GITHUB_ORG}' - $(tr '\n' ' ' < /tmp/app_err)"
+            exit 1
+          fi
+          echo "::add-mask::${APP}"
+
+          # Correct the secret rather than route around it every run. It
+          # holds the S3 endpoint, which serves 400, and everything else
+          # reading it - sync-vercel-env, storageService, importService -
+          # builds dead URLs from the same value.
+          if [ "${R2_PUBLIC_BASE_RAW:-}" != "$BASE" ]; then
+            if GH_TOKEN="$APP" gh secret set R2_PUBLIC_BASE --repo "${GITHUB_ORG}/ontold" --body "$BASE" 2>/tmp/secret_err; then
+              echo "::notice::R2_PUBLIC_BASE now holds the managed domain instead of the S3 endpoint"
+            else
+              echo "::warning::could not correct R2_PUBLIC_BASE: $(head -c 200 /tmp/secret_err). Resolving it each run instead."
+            fi
+          fi
+
+          if ! git clone --depth 1 --branch "${STUDIO_BRANCH}" \
+              "https://x-access-token:${APP}@github.com/${STUDIO_REPO}.git" studio 2>/tmp/clone_err; then
+            echo "::error::cannot read ${STUDIO_REPO}: $(head -c 200 /tmp/clone_err). ontold-app needs Contents: read and write there."
+            exit 1
+          fi
+
+          ffmpeg -version | head -1
+          FILMS=studio/data/publicDomain/films.json node scripts/mirror_public_domain.mjs
+
+          # Verify here, where there is a network. Every clip URL so far has
+          # looked right and served the wrong thing: the S3 endpoint answered
+          # 400 to a browser while the upload reported success.
+          BAD=0
+          while IFS=$'\t' read -r key url; do
+            [ -z "$url" ] && continue
+            CODE=$(curl -sS -o /dev/null --max-time 30 -w '%{http_code}' -r 0-1023 "$url" || echo 000)
+            case "$CODE" in
+              200|206) echo "  ok   $key  $CODE" ;;
+              *) echo "  FAIL $key  $CODE  $url"; BAD=1 ;;
+            esac
+          done < <(node -e '
+            const f = JSON.parse(require("fs").readFileSync("studio/data/publicDomain/films.json", "utf8"));
+            for (const [k, v] of Object.entries(f)) if (v.clip_url) console.log(k + "\t" + v.clip_url);
+          ')
+          if [ "$BAD" -ne 0 ]; then
+            echo "::error::a hosted clip does not serve, so the reel would play nothing. Not pushing."
+            exit 1
+          fi
+
+          cd studio
+          if git diff --quiet -- data/publicDomain/films.json; then
+            echo "::notice::films.json is unchanged - every clip was already hosted at this stamp"
+            exit 0
+          fi
+
+          git config user.name 'ontold-app'
+          git config user.email 'noreply@anthropic.com'
+          git add data/publicDomain/films.json
+          git commit -q -m "Serve the public domain reel from R2
+
+          Cut to the excerpt each segment actually plays and hosted on
+          ontold-public, because a 200MB archive.org original in a <video>
+          tag 500s. Mirrored by ontold's mirror-public-domain."
+
+          if ! GIT_PUSH_BRANCH="${STUDIO_BRANCH}" bash ../scripts/git_push_retry.sh 2>/tmp/push_err; then
+            echo "::error::hosted but could not push: $(head -c 200 /tmp/push_err)."
+            exit 1
+          fi
+          echo "::notice::pushed hosted clip URLs to ${STUDIO_REPO}@${STUDIO_BRANCH}"

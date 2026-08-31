@@ -1,0 +1,4 @@
+{
+  "_why": "Mail stopped on ontold.com. Read what Email Routing is actually doing before deciding anything: enabled or not, which addresses have a rule, whether there is a catch-all, and whether the destinations are verified.",
+  "zone": "ontold.com"
+}

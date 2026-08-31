@@ -1,0 +1,269 @@
+# Give the public bucket one of OUR hostnames.
+#
+# Founder: *"can we use our own urls for r2?"*. Yes — an R2 custom
+# domain, on a zone this account already controls. Everything hosted so
+# far answers on `pub-<32 hex>.r2.dev`, which is Cloudflare's managed
+# domain: functional, cacheable, and visibly not ours in any URL a
+# visitor or a partner ever sees.
+#
+# A custom domain also removes a dependency worth removing. `r2.dev` is
+# rate-limited by Cloudflare and explicitly not meant for production
+# traffic; a custom domain is served through the normal CDN with the
+# zone's own cache rules.
+#
+# ## Read-only unless told otherwise
+#
+# With no inputs this reports what the bucket answers on today. It
+# attaches a domain only when `domain` is given AND `apply` is true —
+# two deliberate acts, because this writes a DNS record into a live
+# zone and the last thing in this programme that wrote DNS unattended
+# took down a mail forwarder.
+#
+# ## After it succeeds
+#
+# The hostname is not enough on its own: every URL already written into
+# the studio's films.json still says r2.dev. Set the `R2_PUBLIC_BASE`
+# repository secret to `https://<domain>` and re-run mirror-public-domain
+# and mirror-ai-films. Both take R2_PUBLIC_BASE as the base for the URLs
+# they write, and both compare what they would write against what is
+# there — so a changed base rewrites the URLs without re-uploading the
+# objects.
+
+name: r2-domain
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Hostname to attach, e.g. media.ontold.com. Empty = report only.'
+        required: false
+        default: ''
+      bucket:
+        description: 'R2 bucket'
+        required: false
+        default: 'ontold-public'
+      remove:
+        description: 'Hostname to DETACH, e.g. an earlier name being replaced.'
+        required: false
+        default: ''
+      apply:
+        description: 'Actually attach it (unticked = report only)'
+        type: boolean
+        default: false
+  push:
+    paths:
+      - '.github/dispatch-requests/r2-domain.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-domain
+  cancel-in-progress: false
+
+jobs:
+  domain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_JURISDICTION: ${{ secrets.R2_JURISDICTION }}
+      # mint_app_token.mjs matches the installation by org and refuses to
+      # guess between three. Leaving it unset is why the first attempt at
+      # writing the secret warned instead of writing.
+      GITHUB_ORG: raineydavid
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read the request
+        id: req
+        run: |
+          set -euo pipefail
+          DOMAIN='${{ inputs.domain }}'
+          BUCKET='${{ inputs.bucket }}'
+          APPLY='${{ inputs.apply }}'
+          REMOVE='${{ inputs.remove }}'
+          REQ=.github/dispatch-requests/r2-domain.json
+          if [ -f "$REQ" ] && [ -z "$DOMAIN" ]; then
+            DOMAIN=$(node -pe 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).domain || ""' "$REQ")
+            BUCKET=$(node -pe 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bucket || ""' "$REQ")
+            APPLY=$(node -pe 'String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).apply === true)' "$REQ")
+            REMOVE=$(node -pe 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).remove || ""' "$REQ")
+          fi
+          [ -z "$BUCKET" ] && BUCKET=ontold-public
+          {
+            echo "domain=$DOMAIN"
+            echo "bucket=$BUCKET"
+            echo "apply=$APPLY"
+            echo "remove=$REMOVE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report, then attach only if asked
+        run: |
+          set -euo pipefail
+          BUCKET='${{ steps.req.outputs.bucket }}'
+          DOMAIN='${{ steps.req.outputs.domain }}'
+          APPLY='${{ steps.req.outputs.apply }}'
+          REMOVE='${{ steps.req.outputs.remove }}'
+
+          [ -z "${CF_API_TOKEN:-}" ] && { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          ACC=$(printf '%s' "${R2_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
+          [ -z "$ACC" ] && { echo "::error::no 32-character account id inside R2_ACCOUNT_ID"; exit 1; }
+          echo "::add-mask::$ACC"
+
+          API="https://api.cloudflare.com/client/v4/accounts/${ACC}/r2/buckets/${BUCKET}"
+          JUR=()
+          [ -n "${R2_JURISDICTION:-}" ] && JUR=(-H "cf-r2-jurisdiction: ${R2_JURISDICTION}")
+          auth=(-H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json")
+
+          echo "### ${BUCKET}" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "--- custom domains today ---"
+          curl -sS "${API}/domains/custom" "${auth[@]}" "${JUR[@]}" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const j=JSON.parse(s);
+                const rows=(j.result&&j.result.domains)||j.result||[];
+                if(!rows.length){console.log("  (none — the bucket answers on its r2.dev managed domain only)");return}
+                for(const d of rows) console.log(`  ${d.domain}  enabled=${d.enabled}  status=${(d.status&&d.status.ownership)||"?"}`)
+              })' | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$DOMAIN" ]; then
+            echo ""
+            echo "report only. Re-run with a domain and apply to attach one."
+            echo "The zone must already be in this Cloudflare account."
+            exit 0
+          fi
+
+          if [ "$APPLY" != "true" ]; then
+            echo ""
+            echo "WOULD attach ${DOMAIN} to ${BUCKET}. Set apply to do it."
+            echo "This writes a DNS record into a live zone, so it is two acts, not one."
+            exit 0
+          fi
+
+          # The zone is REQUIRED in the body. Sending domain alone gets
+          # `10040: The JSON you provided was not well formed`, which is a
+          # confusing way to say "a field is missing" and cost a run.
+          #
+          # Derived by longest-suffix match against the account's own
+          # zones rather than by chopping the first label, so
+          # cdn.ontold.co.uk would find ontold.co.uk and a domain in
+          # somebody else's account finds nothing and says so.
+          ZONES=$(curl -sS "https://api.cloudflare.com/client/v4/zones?per_page=50" "${auth[@]}")
+          ZONE_ID=$(printf '%s' "$ZONES" | DOMAIN="$DOMAIN" node -e '
+            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+              const j=JSON.parse(s); const d=process.env.DOMAIN;
+              const hit=(j.result||[])
+                .filter(z=>d===z.name||d.endsWith("."+z.name))
+                .sort((a,b)=>b.name.length-a.name.length)[0];
+              if(hit) process.stdout.write(hit.id);
+            })')
+          if [ -z "$ZONE_ID" ]; then
+            echo "::error::no zone in this Cloudflare account covers ${DOMAIN}. Zones seen: $(printf '%s' "$ZONES" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(((j.result)||[]).map(z=>z.name).join(", ")||"none — the token may not have Zone:Read")})')"
+            exit 1
+          fi
+          echo "::add-mask::$ZONE_ID"
+          echo "zone resolved"
+
+          echo "--- attaching ${DOMAIN} ---"
+          RESP=$(curl -sS -X POST "${API}/domains/custom" "${auth[@]}" "${JUR[@]}" \
+            --data "{\"domain\":\"${DOMAIN}\",\"zoneId\":\"${ZONE_ID}\",\"enabled\":true,\"minTLS\":\"1.2\"}")
+          printf '%s\n' "$RESP" | head -c 600
+          if ! printf '%s' "$RESP" | grep -q '"success":true'; then
+            # Already attached is the outcome we wanted, not a failure.
+            # Without this the lane could never be re-run to redo the half
+            # of the job that comes AFTER the attach.
+            NOW=$(curl -sS "${API}/domains/custom" "${auth[@]}" "${JUR[@]}")
+            if printf '%s' "$NOW" | grep -q "\"${DOMAIN}\""; then
+              echo ""
+              echo "::notice::${DOMAIN} was already attached; carrying on"
+            else
+              echo; echo "::error::Cloudflare refused the domain"; exit 1
+            fi
+          fi
+
+          # Attached is not the same as serving: the certificate has to be
+          # issued and the record has to propagate. Say which one this is.
+          echo ""
+          echo "::notice::${DOMAIN} attached. Certificate issuance takes a few minutes; until it completes the hostname will not serve."
+          echo ""
+          # ## Set R2_PUBLIC_BASE here rather than asking for it
+          #
+          # Every mirror reads this to decide what to write into the
+          # studio's films.json, so a hostname ATTACHED and a hostname
+          # USED are two different states — and leaving that gap open is
+          # how a rename gets half done and forgotten.
+          #
+          # Same mechanism provision-notify-bearer already uses for
+          # NOTIFY_TOKEN: the ontold-app installation token. The value is
+          # a public hostname rather than a credential; it lives in
+          # secrets only because that is where the workflows look.
+          if [ -n "${GH_APP_PRIVATE_KEY:-}" ]; then
+            APP=$(node scripts/mint_app_token.mjs 2>/tmp/app_err || true)
+            if [ -z "$APP" ]; then
+              echo "::warning::no ontold-app token ($(tr '\n' ' ' < /tmp/app_err | head -c 150)) — set R2_PUBLIC_BASE to https://${DOMAIN} by hand"
+            else
+              echo "::add-mask::${APP}"
+              if GH_TOKEN="$APP" gh secret set R2_PUBLIC_BASE --repo "$GITHUB_REPOSITORY" --body "https://${DOMAIN}" 2>/tmp/gherr; then
+                echo "::notice::R2_PUBLIC_BASE set to https://${DOMAIN}"
+                echo "Set \`R2_PUBLIC_BASE\` to \`https://${DOMAIN}\`." >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::could not write R2_PUBLIC_BASE: $(head -c 150 /tmp/gherr). Set it by hand."
+              fi
+            fi
+          else
+            echo "::warning::no GH_APP_PRIVATE_KEY here, so R2_PUBLIC_BASE was not set. Do it by hand: https://${DOMAIN}"
+          fi
+
+          # ## What is set, by name
+          #
+          # Founder: *"how do I know what all the secrets you've set
+          # are"*. From here, and not by taking anybody's word for it.
+          # GitHub returns NAMES and never values — there is no API that
+          # reads a secret back — so this is an inventory, not an
+          # exposure, and `last updated` is what says which ones moved
+          # recently and who moved them.
+          if [ -n "${APP:-}" ]; then
+            echo ""
+            echo "--- repository secrets, names only ---"
+            {
+              echo ""
+              echo "| secret | last updated |"
+              echo "| --- | --- |"
+              GH_TOKEN="$APP" gh api "repos/${GITHUB_REPOSITORY}/actions/secrets?per_page=100" \
+                --jq '.secrets[] | "| \(.name) | \(.updated_at) |"' 2>/dev/null \
+                || echo "| (could not list — the app installation may lack Secrets: read) | |"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo ""
+          echo "NEXT: re-run mirror-public-domain (and mirror-ai-films) so the URLs"
+          echo "already written are rewritten against the new base."
+          {
+            echo ""
+            echo "Attached \`${DOMAIN}\`. Set \`R2_PUBLIC_BASE\` to \`https://${DOMAIN}\` and re-run the mirrors."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Detaching happens AFTER the attach, never instead of it, so a
+          # rename cannot leave the bucket briefly answering on nothing.
+          if [ -n "$REMOVE" ]; then
+            echo ""
+            echo "--- detaching ${REMOVE} ---"
+            DEL=$(curl -sS -X DELETE "${API}/domains/custom/${REMOVE}" "${auth[@]}" "${JUR[@]}")
+            printf '%s\n' "$DEL" | head -c 400
+            if printf '%s' "$DEL" | grep -q '"success":true'; then
+              echo ""
+              echo "::notice::${REMOVE} detached"
+              echo "Detached \`${REMOVE}\`." >> "$GITHUB_STEP_SUMMARY"
+            else
+              # A warning, not a failure: the new hostname is attached and
+              # working, and an old one left behind is untidy rather than
+              # broken.
+              echo ""
+              echo "::warning::could not detach ${REMOVE} — it is still pointing at this bucket"
+            fi
+          fi

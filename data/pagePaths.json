@@ -1,0 +1,36 @@
+{
+  "note": "One table, three implementations. The Worker (JS), /api/run (Python) and the renderer all decide what a publishable path is, in different runtimes, so none can import the others. This is what stops them drifting: all are tested against these cases.",
+  "accepted": {
+    "pricing": "pricing.html",
+    "pricing.html": "pricing.html",
+    "/pricing": "pricing.html",
+    "about-us": "about-us.html",
+    "docs/api": "docs/api.html",
+    "docs/api.html": "docs/api.html",
+    "a/b/c/d": "a/b/c/d.html",
+    "sitemap.xml": "sitemap.xml",
+    "robots.txt": "robots.txt"
+  },
+  "rejected": [
+    "",
+    "/",
+    "..",
+    "../other/index",
+    "a/../../b",
+    "./x",
+    "a//b",
+    "a b",
+    "a?b",
+    "-lead",
+    "PRICING.HTML",
+    "a/b/c/d/e",
+    "shell.php",
+    "sitemap.xml.html",
+    "robots.txt/x"
+  ],
+  "siteFiles": [
+    "sitemap.xml",
+    "robots.txt"
+  ],
+  "siteFilesNote": "Published verbatim, not treated as pages. An explicit allowlist rather than opening the publish path to arbitrary extensions."
+}

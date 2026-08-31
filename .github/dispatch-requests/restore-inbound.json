@@ -1,0 +1,5 @@
+{
+  "_why": "Founder asked whether receiving could just be added on CLOUDFLARE instead of restoring Mailgun. It can -- the MX already points there, so it is rules, not DNS. This reads what routing is actually doing first: enabled or not, which addresses have a rule, whether there is a catch-all, and whether the destinations are verified. An unverified destination delivers nothing and looks exactly like a missing rule. Still changes nothing.",
+  "zone": "ontold.com",
+  "apply": false
+}

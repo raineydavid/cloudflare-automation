@@ -1,0 +1,138 @@
+name = "ontold-mcp"
+main = "src/index.mjs"
+compatibility_date = "2026-08-01"
+
+# Ontold's MCP server at the edge — the surface external agents
+# (ChatGPT, Claude, a WorkAIs agent) call. Ported from api/_mcp.py,
+# which served it from inside api/status.py on Vercel.
+#
+# Why it moved (issue #116):
+#   - publish writes R2 through the SITES binding below instead of
+#     presenting a bearer to our own site-host Worker over the public
+#     internet. One hop and one shared secret removed outright.
+#   - Vercel Hobby caps a deployment at 12 serverless functions; eight
+#     were used and /mcp was riding inside status.py to avoid a ninth.
+#   - OAuth 2.1 (the stated next step) is a library swap here.
+#
+# Founder: "why would you deploy that there? I thought we do everything
+# on ontold.site or workais.app". Right — the workers.dev address was
+# just the default that showed up because this line was commented out.
+#
+# ontold.site, not workais.app: this serves ONTOLD's capabilities
+# (compose, generate, roster, mint_worker). WorkAIs is a CALLER, and so
+# are ChatGPT and Claude. Naming the endpoint after one of its consumers
+# would mean an agent connecting to "Ontold" is pointed at a domain
+# called workais.app, and if the two products ever separate, Ontold's
+# API address belongs to the other one.
+#
+# ontold.site rather than ontold.com because CLOUDFLARE_API_TOKEN holds
+# Workers Routes Write over workais.app / ontold.site / onloved.com and
+# NOT ontold.com (granted 2026-07-25 — see deploy-site-host.yml). A
+# route on a zone the token cannot reach fails the deploy.
+#
+# This wins over site-host's `*.ontold.site/*` wildcard because
+# Cloudflare picks the most specific matching route. That also makes
+# `mcp` unusable as a published-site slug, so it is in RESERVED_SLUGS —
+# otherwise publishing to it would silently 404 for the visitor and
+# nobody would connect the two.
+routes = [{ pattern = "mcp.ontold.site/*", zone_name = "ontold.site" }]
+
+# The SAME bucket the site-host Worker serves from — publish writes
+# sites/<slug>/index.html and site-host reads it. Two Workers, one
+# bucket, no HTTP between them.
+[[r2_buckets]]
+binding = "SITES"
+bucket_name = "ontold-sites"
+
+# Provenance records (issue #110), in their OWN bucket rather than a
+# prefix inside ontold-sites. site-host serves that bucket to the public
+# internet, and while it only ever reads keys under `sites/`, "a signed
+# record of who made what" and "a bucket wired to a public web server"
+# should not be one misrouted request apart.
+[[r2_buckets]]
+binding = "PROVENANCE"
+bucket_name = "ontold-provenance"
+
+# Telling somebody their generation is ready.
+#
+# No credential: the binding IS the authority, which is the whole reason
+# mail lives in this Worker rather than in a Vercel function. The first
+# attempt sent from Vercel over the REST API and was refused `401 10000`
+# — a token without Email Sending. There is no token here to get wrong.
+#
+# No allowed_destination_addresses. This notifies customers, so the
+# destination is by definition not a list we hold — the gate is the
+# bearer on /notify, which refuses when unset rather than relaying.
+#
+# Until the sending domain is onboarded, Cloudflare accepts only verified
+# destination addresses whatever this says.
+[[send_email]]
+name = "EMAIL"
+
+# Per-minute spend windows. If this is unbound, cost-bearing tools
+# REFUSE rather than run uncounted — see withinLimit in src/index.mjs.
+# Create with: wrangler kv namespace create ontold-mcp-rate
+# [[kv_namespaces]]
+# binding = "RATE"
+# id = "<fill from the create output>"
+
+# Secrets (wrangler secret put, never in this file):
+#   ONTOLD_MCP_TOKEN  — the caller bearer AND the enable flag for
+#                       generate/publish. Unset → surface is open.
+#   ONTOLD_ROOT_SECRET— fallback the per-tool token derives from.
+#   GH_PAT            — actions:write on raineydavid/ontold, so
+#                       generate can queue a render.
+#
+# Deliberately ABSENT: every model/provider credential. Those stay in
+# GitHub secrets and are read only on the runner. This Worker can queue
+# a render; it cannot read the keys that pay for one.
+
+# Dynamic Workers (issue #117) — the binding that lets a minted agent
+# actually run. env.LOADER.get(id, cb) composes an isolate whose egress
+# is the SHAPE of its consent record: permitted → the one provider host
+# that channel needs; refused → globalOutbound: null, which cannot
+# reach anything at all.
+#
+# That is the point. A refusal stops being an if-statement some future
+# caller can forget and becomes an absent capability.
+# COMMENTED OUT until the sandbox is actually routed. Dynamic Workers
+# are an open beta, this account has never used one, and an
+# unprovisionable binding fails the WHOLE deploy — which would take the
+# working MCP surface down for a feature nothing calls yet. The module
+# and its 42 tests are in the tree; the binding goes live in the same
+# change that gives it a route. Pricing is still unestablished (#117)
+# and nothing should be minted per-user until it is known.
+# [[worker_loaders]]
+# binding = "LOADER"
+
+[vars]
+# The sender and the reply path. Not secrets — they appear in every
+# message — and overridable here without touching code.
+#
+# ontold.site, not ontold.com — the same reason the route above is on
+# ontold.site: this token covers workais.app / ontold.site / onloved.com
+# and NOT ontold.com.
+#
+# `mail.`, and nothing sends until that subdomain is onboarded under
+# Email → Email Sending. A transactional sender wants its own subdomain:
+# it carries the SPF and DKIM records and keeps a bounce rate off the
+# reputation of the domain the site is served on.
+#
+# This briefly said `no-reply@ontold.site`, because the zone carried a
+# DKIM key for the apex and that looked like onboarding. It was another
+# provider's key — the selector was not `cf2024-*` — and the send was
+# refused `could not find domain config of sending domain` exactly as
+# before. A DKIM record means SOME provider can sign for the name; only
+# a Cloudflare selector means Cloudflare can, and
+# scripts/sending_domains.py now reports that difference rather than the
+# bare presence of a key.
+#
+# So the address stays where it should be and the domain has to catch
+# up. The onboarded domain and the From address are ONE decision:
+# onboard first, change this second, in that order.
+MAIL_FROM = "no-reply@mail.ontold.site"
+MAIL_REPLY_TO = "hello@ontold.site"
+GH_OWNER = "raineydavid"
+GH_REPO = "ontold"
+GH_WORKFLOW = "demo.yml"
+GH_REF = "main"

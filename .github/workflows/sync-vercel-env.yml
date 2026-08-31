@@ -1,0 +1,127 @@
+# Copy the storage variables from GitHub secrets into Vercel.
+#
+# R2 is populated by seed-r2.yml using GitHub's secrets, and /api/watch
+# on Vercel returns 500 for every video. Same bucket, different
+# environment's variables — and Vercel scopes vars per environment, so a
+# Production-only value is invisible to a preview deployment, which
+# looks identical to a credential being wrong.
+#
+# Values never leave the runner and are never printed. The logic lives
+# in scripts/vercel_env_sync.py; this file only hands it the secrets.
+# (Inline Python here would sit at column 0 inside `run:` and break the
+# YAML block scalar — that has bitten this repo before.)
+#
+# HOW TO RUN IT
+#
+#   Edit APPLY / TARGET just below and push THIS FILE. That is the whole
+#   control surface — there is no companion config file to find, and no
+#   Run button to hunt for. (A workflow_dispatch workflow is only listed
+#   in the Actions UI once its file is on the DEFAULT branch, so on a
+#   feature branch the button does not exist. Once this reaches main the
+#   form works too, and its inputs win over the values here.)
+#
+# Dry-run by default: it writes to the platform serving the site, so the
+# first run should show what it WOULD do. Only the literal string 'true'
+# applies — 'yes', 'True' and an empty value all stay a dry run.
+
+name: sync-vercel-env
+
+on:
+  # Pushing this file IS the request. Editing the two values below and
+  # pushing is the only step, which is the point: one file to open, one
+  # place to look.
+  push:
+    paths:
+      - '.github/workflows/sync-vercel-env.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which Vercel environments to write'
+        type: choice
+        # Vercel scopes vars per environment: a Production-only value is
+        # invisible to a preview deployment, and that failure looks
+        # exactly like a wrong credential. Both is the useful default.
+        # QUOTED: an unquoted `preview,production` inside a YAML flow
+        # sequence parses as TWO entries, and the default then matches
+        # no option — GitHub rejects the dispatch.
+        options: ['preview,production', 'preview', 'production', 'all']
+        default: 'preview,production'
+      apply:
+        description: 'Actually write (unticked = dry run)'
+        type: boolean
+        default: false
+
+# ── THE TWO KNOBS ────────────────────────────────────────────────────
+# Change these, push, done.
+env:
+  #: 'false' prints what it WOULD do and writes nothing.
+  #: 'true'  writes. Nothing else counts as yes.
+  APPLY: 'false'
+  #: Vercel scopes variables per environment, so a production-only value
+  #: is invisible to a preview deployment — and that failure looks
+  #: exactly like a wrong credential. Both is the useful default.
+  TARGET: 'preview,production'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Sync
+        env:
+          # VERCEL_TOKEN is the only one you must set. The project
+          # defaults to its name and the team is discovered from the
+          # token; the other two are overrides for when that guess is
+          # wrong, not prerequisites.
+          VERCEL_TOKEN:      ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID:     ${{ secrets.VERCEL_ORG_ID }}
+          # These MUST resolve exactly as seed-r2.yml resolves them.
+          # That workflow uploads the assets; this one tells Vercel
+          # where to read them. If the two disagree about the bucket,
+          # the upload succeeds, the read 404s, and neither side looks
+          # misconfigured — which is the bug this file was written for.
+          #
+          # R2_BUCKET is the one that bites. It exists only as a
+          # 'preview' ENVIRONMENT secret, and an environment secret is
+          # invisible to a job that does not declare that environment —
+          # so a bare secrets.R2_BUCKET is empty here and gets skipped,
+          # leaving Vercel with no bucket at all. seed-r2.yml falls
+          # through to the literal name for the same reason, so the
+          # literal is the value actually in use and belongs here too.
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+          R2_JURISDICTION:      ${{ secrets.R2_JURISDICTION }}
+          R2_PUBLIC_BASE:       ${{ secrets.R2_PUBLIC_BASE       || secrets.CLOUDFLARE_R2_PUBLIC_URL }}
+          # The bearer api/_mail.py presents to /notify. Normally written
+          # by provision-notify-bearer.yml, which sets the Worker, this
+          # repository and Vercel in one act; passed here too so a
+          # run of this workflow repairs Vercel rather than leaving it
+          # behind — and so the declared list and what is passed cannot
+          # drift, which test_vercel_env_sync checks.
+          NOTIFY_TOKEN:         ${{ secrets.NOTIFY_TOKEN }}
+          MCP_TOKEN:            ${{ secrets.MCP_TOKEN }}
+        run: |
+          # A manual dispatch's form wins when there is one; a push uses
+          # the values committed at the top of this file.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT_TARGET="${{ inputs.target }}"; WANT_APPLY="${{ inputs.apply }}"
+          else
+            WANT_TARGET="$TARGET"; WANT_APPLY="$APPLY"
+          fi
+          # Compared against the literal string, so anything else — 'yes',
+          # 'True', empty — is a dry run. This writes to the platform
+          # serving the site; an ambiguous value must never read as
+          # consent.
+          if [ "$WANT_APPLY" = "true" ]; then
+            python3 scripts/vercel_env_sync.py --target "$WANT_TARGET" --apply
+          else
+            python3 scripts/vercel_env_sync.py --target "$WANT_TARGET"
+          fi

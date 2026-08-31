@@ -1,0 +1,87 @@
+# Give the Cloudflare token the email permissions it never had.
+#
+# Two provisioning workflows are blocked on one credential:
+# provision-sending-domain cannot onboard a sending domain, and
+# provision-email-routing cannot even READ routing. Both are refused
+# `Authentication error [code: 10000]`. The token predates Cloudflare's
+# email permission groups; nothing about either domain is wrong.
+#
+# ## Edit, do not mint
+#
+# `mint-deploy-token` would produce a token with no R2 and no Workers
+# Routes, so replacing this one would break deploy-mcp,
+# deploy-site-host and seed-r2 in order to fix mail. Editing a token
+# preserves its VALUE, so no secret in this repository changes and
+# nothing has to be coordinated.
+#
+# ## This writes to the credential every deploy depends on
+#
+# So it is a DRY RUN unless asked, it appends one policy and passes
+# every existing one through untouched, and it probes what the token
+# can reach on both sides of the write. Anything that worked before and
+# does not after is reported as a regression this caused, rather than
+# left to surface a week later as a deploy nobody can explain.
+#
+# If the token lacks Account API Tokens: Edit it cannot change itself,
+# the run says so, and nothing happens.
+#
+#   echo '{"apply":true}' > .github/dispatch-requests/grant-email-permissions.json
+
+name: grant-email-permissions
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/grant-email-permissions.json'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Actually edit the token (unticked = report only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grant-email-permissions
+  cancel-in-progress: false
+
+jobs:
+  grant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+
+      # The zone comes from the mail config, so this cannot widen a
+      # credential for a domain the platform does not send from.
+      - name: Which zone needs it?
+        id: zone
+        run: |
+          set -euo pipefail
+          ZONE=$(python3 -c 'from api._mail import mail_zone; print(mail_zone())')
+          echo "[grant] mail lives on $ZONE"
+          echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+
+      - name: Grant
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ZONE: ${{ steps.zone.outputs.zone }}
+        run: |
+          set -o pipefail
+          # A pushed request file carrying {"apply":true} is consent; a
+          # manual run defaults to looking first. Compared against the
+          # literal string, so nothing ambiguous reads as yes.
+          WANT=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT="${{ inputs.apply }}"
+          elif python3 -c 'import json,sys; sys.exit(0 if json.load(open(".github/dispatch-requests/grant-email-permissions.json")).get("apply") is True else 1)'; then
+            WANT=true
+          fi
+          if [ "$WANT" = "true" ]; then
+            python3 scripts/grant_email_permissions.py "$ZONE" --apply | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/grant_email_permissions.py "$ZONE" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,336 @@
+# Which domains can send, which can receive, and which only look like it.
+#
+# Read-only. One row per zone in the Cloudflare account, two columns:
+# OUT (can `no-reply@mail.<zone>` leave?) and IN (does a reply to
+# `hello@<zone>` reach a person?).
+#
+# ## Why this exists
+#
+# Every mail failure in this programme has been a domain with one half
+# configured and the other absent, found by hand, weeks apart, after
+# somebody noticed mail going missing. Each provisioning workflow here
+# answers the question for the one zone it was pointed at, which is
+# fine for the zone you already suspect and no use at all for the one
+# nobody is thinking about.
+#
+# The zone list comes from the ACCOUNT, so a domain onboarded later is
+# covered without editing anything, and this repository never names its
+# sibling sites in its own source.
+#
+# ## It applies nothing
+#
+# Enabling routing rewrites a zone's MX and takes delivery for the
+# whole domain away from whatever holds it. That decision belongs to
+# provision-email-routing.yml, which is guarded on the zone's own MX.
+# This only ever reports.
+#
+#   echo '{"why":"..."}' > .github/dispatch-requests/mail-estate.json
+
+name: mail-estate
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/mail-estate.json'
+  workflow_dispatch:
+  schedule:
+    # DAILY, not weekly. A domain whose routing rule is deleted, whose
+    # DKIM is replaced, or whose delegation stops matching goes quiet
+    # rather than erroring — nobody reports mail that simply never
+    # arrives, and nobody reports a site that resolves nowhere either.
+    #
+    # It was weekly. screeningstudio.com was dark for about a week —
+    # site and mail together — and a weekly check cannot do better than
+    # that by construction. The read is free: one API pass and a
+    # handful of DNS queries.
+    #
+    # This is also what closes out a fix made elsewhere. When the
+    # nameservers on a pending domain are corrected at its registrar,
+    # nobody has to remember to come back and confirm: the next day's
+    # run says 18 of 18 on its own.
+    #
+    # NOT FIRING. GitHub runs scheduled workflows only on a
+    # repository's DEFAULT branch, and this lives on a feature branch,
+    # so this cron has never once executed. Every mail-estate run in
+    # the history was pushed by hand.
+    #
+    # Which means the check written to catch a zone going quiet could
+    # not have caught the ontold.com outage on 2026-08-28 either — the
+    # founder noticed, a day later, because mail stopped arriving. That
+    # is exactly the failure this schedule exists to prevent, and it
+    # will keep not preventing it until this branch is merged.
+    - cron: '17 7 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-estate
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/setup-python@v6
+
+      - name: Resolve account id
+        id: preflight
+        env:
+          RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "::error::No 32-hex Cloudflare account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+      # The local part and the sending prefix come from what the Worker
+      # actually sends and replies as, so this cannot report on an
+      # arrangement nothing uses.
+      - name: Which addresses are we asking about?
+        id: addresses
+        run: |
+          set -euo pipefail
+          REPLY_TO=$(python3 -c 'from api._mail import HELLO; print(HELLO)')
+          FROM=$(python3 -c 'from api._mail import DEFAULT_MAIL_FROM, sending_domain; print(sending_domain(DEFAULT_MAIL_FROM))')
+          echo "reply_local=${REPLY_TO%@*}" >> "$GITHUB_OUTPUT"
+          # `mail.ontold.site` -> `mail`. The prefix, not the domain:
+          # the same arrangement is asked about on every zone.
+          echo "prefix=${FROM%%.*}" >> "$GITHUB_OUTPUT"
+          echo "[mail] reply to ${REPLY_TO%@*}@<zone>, send from ${FROM%%.*}.<zone>"
+
+      # `/accounts/{id}/email/sending/domains` answers 404 with code
+      # 10001 on every token this account has — including one holding
+      # Email Sending Read and Write at account scope that can POST to
+      # /email/sending/send successfully. Two repositories have spent
+      # runs on that 404. wrangler reaches the same resource and works,
+      # so the OUT column is read from the thing that answers.
+      - name: What is onboarded for sending
+        id: sending
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -uo pipefail
+          if npx wrangler@4 email sending list > /tmp/sending.txt 2>&1; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            # Not fatal. An unreadable list is reported as UNKNOWN per
+            # domain rather than as "cannot send", which would send
+            # somebody to re-onboard a domain that works.
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "::group::wrangler email sending list"; cat /tmp/sending.txt; echo "::endgroup::"
+
+      - name: Say what is true, per domain
+        id: report
+        env:
+          SENDING_LIST: /tmp/sending.txt
+          SENDING_LIST_OK: ${{ steps.sending.outputs.ok }}
+          # The purpose-scoped email credential when it exists, the
+          # deploy one otherwise. This report needs to reach EVERY zone,
+          # so a zone-scoped token will show most rows as unreadable —
+          # which the report says rather than calling them broken.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_EMAIL_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          REPLY_LOCAL: ${{ steps.addresses.outputs.reply_local }}
+          MAIL_PREFIX: ${{ steps.addresses.outputs.prefix }}
+          # The customer-facing domain, when it differs from the zone
+          # mail currently runs on. Named in a variable rather than
+          # here: which domain is the product is a decision, and this
+          # file should not be the place it is recorded.
+          PRODUCT_ZONE: ${{ vars.PRODUCT_ZONE }}
+        run: |
+          # `set +e` FIRST. Steps run under `bash -e`, the report exits
+          # non-zero whenever any domain is not ready — which is the
+          # point of it — and without this the step dies on that line
+          # and everything after it never runs. That is exactly what
+          # happened to the pending-zone diagnosis below: it was added,
+          # pushed, and produced nothing at all, silently. Third time
+          # this specific trap has been sprung in one afternoon.
+          set +e
+          set -o pipefail
+          {
+            echo "### Mail estate"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Non-zero when any domain is not ready both ways, which is
+          # the point: this should go red while mail is broken anywhere.
+          python3 scripts/mail_estate.py | tee -a "$GITHUB_STEP_SUMMARY"
+          RC=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # A pending zone serves no DNS, so nothing configured on it can
+          # work and no mail API will touch it. Two things are worth
+          # doing before telling somebody to go to their registrar: ask
+          # Cloudflare to RE-CHECK the delegation, because a zone goes
+          # active when it notices and the check does not run forever;
+          # and print both nameserver lists, because "delegate your
+          # nameservers" is not actionable without the values.
+          {
+            echo ""
+            echo "### Zones not yet active"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # `tee`, not a redirect. The first version sent this whole
+          # block to the step summary alone, so it produced nothing in
+          # the job log and read exactly like a step that had died —
+          # which is what I concluded it had. Diagnostics belong in both
+          # places or they are unreadable from whichever one you have.
+          python3 scripts/mail_estate.py --pending --activate 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # One machine-readable document, so a dashboard renders the
+          # measurement rather than re-deriving it from prose. Uploaded
+          # as an artifact: a snapshot of live infrastructure does not
+          # belong in the git history, where it would be a diff on every
+          # run and stale between them.
+          MAIL_ESTATE_JSON=1 python3 scripts/mail_estate.py > /tmp/mail-estate.json 2>/dev/null || true
+          echo "::group::mail-estate.json"; cat /tmp/mail-estate.json; echo "::endgroup::"
+
+          # DELEGATION, for every zone rather than only the broken-looking
+          # ones. screeningstudio.com was delegated to one Cloudflare
+          # nameserver pair while assigned another: both pairs are
+          # Cloudflare's, so the registrar UI and the Cloudflare zone
+          # page each looked right, and the domain resolved nowhere. It
+          # took most of a day to find by hand and showed in no
+          # dashboard. One query per zone catches it in a minute.
+          {
+            echo ""
+            echo "### Delegation: does the registry point where each zone expects?"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mail_estate.py --delegation 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # DMARC, per zone. Not needed for mail to work, which is why
+          # it goes unnoticed: everything functions and the gap only
+          # shows when somebody is forging you. ontold.com had a policy
+          # on mail.ontold.com and none on the apex -- the domain
+          # customers actually see.
+          {
+            echo ""
+            echo "### DMARC: does each domain say what to do with mail forged as it?"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mail_estate.py --dmarc 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # The zone the Worker actually sends and replies from, in
+          # full. The summary above says whether it works; this says
+          # what it is, which is what you need when deciding whether to
+          # move a mail domain.
+          {
+            echo ""
+            echo "### Records on the reply zone, and on the product domain"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The product domain falls back to the one api/_mail already
+          # names in its User-Agent, rather than a literal added here.
+          # It is this repository's own site, so naming it is fine; a
+          # second copy of it that can drift is not.
+          : "${PRODUCT_ZONE:=$(python3 -c 'from api._mail import USER_AGENT; import re; m=re.search(r"https://([^)\s]+)", USER_AGENT); print(m.group(1) if m else "")')}"
+          for Z in "$(python3 -c 'from api._mail import mail_zone; print(mail_zone())')" "${PRODUCT_ZONE:-}"; do
+            [ -z "$Z" ] && continue
+            python3 scripts/mail_estate.py --records "$Z" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # For a zone Cloudflare does not serve, the Cloudflare API
+          # knows NOTHING about whether the domain has mail — so the
+          # report above cannot answer for it, and "NO" is as unfounded
+          # as "yes". The domain's real DNS is public; ask it.
+          #
+          # This matters because the answer changes what to do: a domain
+          # receiving through its other provider needs nothing, and one
+          # receiving nowhere needs a decision.
+          {
+            echo ""
+            echo "### What the public DNS says for zones Cloudflare does not serve"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mail_estate.py --pending 2>/dev/null | awk '/:.*(PENDING|MOVED|INITIALIZING)/ {print $1}' | tr -d ':' | while read -r D; do
+            [ -z "$D" ] && continue
+            echo "$D"
+            # The RESPONSE STATUS first, not the records. Every
+            # lookup below came back empty last run -- no A, no MX, no
+            # TXT -- and empty is ambiguous for the seventh time today:
+            # NOERROR with no records means "delegated, nothing set",
+            # NXDOMAIN means the name does not exist at all, and
+            # SERVFAIL means the nameservers are not answering. Those
+            # need completely different responses, and the record lines
+            # alone cannot tell them apart.
+            ST=$(dig +time=3 +tries=2 @1.1.1.1 A "$D" 2>/dev/null | awk -F'status: ' '/status:/ {split($2,a,","); print a[1]}')
+            echo "  status: ${ST:-no answer from the resolver}"
+            # SERVFAIL has one overwhelmingly likely cause for a domain
+            # that used to be on Cloudflare: a DS record left at the
+            # REGISTRY after the nameservers moved away. Cloudflare signs
+            # its zones; move the delegation without removing the DS and
+            # every validating resolver -- 1.1.1.1 included -- refuses
+            # the whole domain. The site goes dark with the mail.
+            #
+            # Tested, not assumed: +cd disables validation. An answer
+            # with +cd and SERVFAIL without it IS the signature.
+            CD=$(dig +cd +time=3 +tries=2 @1.1.1.1 A "$D" 2>/dev/null | awk -F'status: ' '/status:/ {split($2,a,","); print a[1]}')
+            echo "  status with validation disabled: ${CD:-no answer} $([ "${ST:-}" = SERVFAIL ] && [ "${CD:-}" = NOERROR ] && echo '<- DNSSEC: a DS record at the registry no longer matches the nameservers')"
+            echo "  DS at the registry: $(dig +short +time=3 +tries=2 @1.1.1.1 DS "$D" | head -3 | paste -sd'; ' - || echo none)"
+            echo "  NS (validation off): $(dig +cd +short +time=3 +tries=2 @1.1.1.1 NS "$D" | paste -sd', ' - || true)"
+            echo "  A  (validation off): $(dig +cd +short +time=3 +tries=2 @1.1.1.1 A "$D" | paste -sd', ' - || true)"
+            echo "  MX (validation off): $(dig +cd +short +time=3 +tries=2 @1.1.1.1 MX "$D" | paste -sd', ' - || true)"
+            # THE REGISTRY ITSELF, asked directly rather than through a
+            # recursive resolver. This is the question a person can act
+            # on, and the two answers need opposite responses:
+            #
+            #   a delegation here   the domain is registered and
+            #                       delegated; the nameservers it names
+            #                       are simply not serving the zone --
+            #                       a lapsed DNS host. Fix it there, or
+            #                       repoint the delegation.
+            #   nothing here        the registry has no delegation: the
+            #                       registration itself has lapsed.
+            #                       Renewing is the only thing that
+            #                       helps, and no nameserver change will.
+            #
+            # A recursive resolver answering SERVFAIL cannot tell you
+            # which of those it is, and that is the whole difficulty.
+            TLD=$(dig +short +time=3 +tries=2 @1.1.1.1 NS "${D##*.}." | head -1)
+            echo "  registry (${TLD:-unknown}) says: $(dig +norecurse +time=3 +tries=2 @"${TLD:-a.gtld-servers.net}" NS "$D" 2>/dev/null | awk '/^'"$D"'\.[[:space:]]/ && /NS/ {print $NF}' | paste -sd', ' - || true)"
+            echo "  NS:   $(dig +short +time=3 +tries=2 @1.1.1.1 NS "$D" | paste -sd', ' - || true)"
+            echo "  MX:   $(dig +short +time=3 +tries=2 @1.1.1.1 MX "$D" | paste -sd', ' - || true)"
+            echo "  SPF:  $(dig +short +time=3 +tries=2 @1.1.1.1 TXT "$D" | grep -i 'v=spf1' | head -1 || true)"
+            # The site records too. Moving a delegation moves ALL of
+            # DNS, so the only way to know whether the switch is safe is
+            # to compare what the current provider serves against what
+            # the Cloudflare zone already holds, printed above.
+            echo "  A:    $(dig +short +time=3 +tries=2 @1.1.1.1 A "$D" | paste -sd', ' - || true)"
+            echo "  www:  $(dig +short +time=3 +tries=2 @1.1.1.1 CNAME "www.$D" | paste -sd', ' - || true)$(dig +short +time=3 +tries=2 @1.1.1.1 A "www.$D" | paste -sd', ' - || true)"
+          done 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $RC
+
+      # The snapshot, kept for whoever is building the view. `always()`
+      # because the report exits non-zero whenever a domain is broken,
+      # which is exactly when somebody wants to look at it.
+      - name: Keep the snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mail-estate
+          path: /tmp/mail-estate.json
+          if-no-files-found: warn
+          retention-days: 30
