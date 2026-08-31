@@ -93,6 +93,56 @@ Variables: `GITHUB_ORG`, `GH_APP_ORG`, `PRODUCT_ZONE`, `MAIL_DOMAIN`,
 None are set here. The workflows read them from this repo's own Actions
 secrets, so they must be created before any lane will run.
 
+## Cloudflare product sweep
+
+Every Cloudflare product was checked against the source tree — binding
+declarations in `wrangler.toml` first, then a name sweep across the repo. What
+is actually in use:
+
+| Product | In use | Where |
+|---|---|---|
+| **Workers** | yes | `workers/{mcp,site-host,wallet-signer}`, `api/_cdn-warmer` |
+| **R2** | yes | `SITES` + `PROVENANCE` bindings; `provision-r2`, `seed-r2`, `r2-domain` |
+| **Workers KV** | yes | `WARM_LOG` / `HIT_LOG` / `DERIVE_LOG` (cdn-warmer); `RATE` commented out in mcp |
+| **Email Routing** | yes | inbound rules — `provision-email-routing`, `switch-inbound`, `restore-inbound` |
+| **Email Sending** | yes | `[[send_email]]` binding in mcp; `provision-sending-domain`, DMARC |
+| **Custom hostnames** (Cloudflare for SaaS) | yes | `attach-domain`; the `*/*` route it adds out-of-band |
+| **Cron Triggers** | yes | cdn-warmer, `crons = ["*/10 * * * *"]` |
+| **DNS / zones / registrar** | yes | `audit-zone`, `adopt-domains`, `provision-dmarc` |
+| **D1** | token only | `mint-d1-token` mints a D1-scoped token; **no D1 binding exists yet** |
+| **Dynamic Workers** (`worker_loaders`) | staged | `LOADER` binding commented out in mcp; `agentSandbox.mjs` + tests are in-tree, awaiting a route |
+| **AI Gateway** | yes, but | see below — stayed in ontold |
+| **Durable Objects** | no | — |
+| **Queues** | no | — |
+| **Vectorize** | no | — |
+| **Workers AI** (`@cf/…`) | no | — |
+| **Hyperdrive, Analytics Engine, Browser Rendering, Stream, Pages, Turnstile, Zero Trust, Images, WAF/rulesets, Logpush, Tunnels, Load Balancers, Page Rules, Snippets, R2 event notifications** | no | — |
+
+Three earlier greps looked like hits and are not: "DURABLE ASSET" is prose in
+`scripts/blender/`, "vectorize" is an image-tracing step in a PRD, and "queue"
+never appears as a Cloudflare Queue. No Durable Object, Queue, or Vectorize
+binding exists anywhere in the source tree.
+
+### AI Gateway — a real surface that stayed behind
+
+`api/_aiProviders-google.ts` optionally proxies every Google model call through
+`https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/google-ai-studio`,
+switched on by `CF_AI_GATEWAY_ACCOUNT`, `CF_AI_GATEWAY_ID` and (only with
+Authenticated Gateway) `CF_AI_GATEWAY_TOKEN`.
+
+It did not come across because it is app runtime code — a Google provider shim
+nothing in this repo calls — and because **there is no automation to extract**:
+the gateway is created by hand in the dashboard under AI → AI Gateway, and the
+three variables are set by hand. That is the one Cloudflare surface in ontold
+with no workflow behind it. If you want it automated, that lane does not exist
+yet and would be new work.
+
+### D1 has a token but no database
+
+`mint-d1-token` mints a D1-scoped API token, and `mint-deploy-token` /
+`attach-domain` reference D1 in their scope lists. No `[[d1_databases]]` binding
+exists in any `wrangler.toml` — the credential lane runs ahead of the database.
+
 ## What was left behind, and why
 
 This is the Cloudflare surface, not the app around it. Left in `ontold`:
@@ -102,8 +152,10 @@ This is the Cloudflare surface, not the app around it. Left in `ontold`:
   `verify-transform-reveal`, `fetch-brief-source`.
 - **`check-keys`** — audits AI-provider keys (Gemini, Runware), not Cloudflare.
 - **`api/watch.py`, `api/status.py`, `api/seed/`, `scaffolding/`** — Vercel app
-  code. Only `api/_mail.py`, `api/_secrets.py`, `api/_env.py` came across,
-  because `scripts/mail_check.py` and `scripts/derive_tokens.py` import them.
+  code. From `api/` only what this repo's own code needs came across:
+  `_mail.py`, `_secrets.py`, `_env.py` (imported by `mail_check.py` and
+  `derive_tokens.py`), plus the `_consent.py` / `_provenance.py` cluster —
+  see below.
 
 Two tests were scoped down rather than deleted, each with the reason written at
 the edit:
@@ -144,3 +196,24 @@ Several scripts default to ontold's own values — `R2_BUCKET=ontold-public`,
 `R2_PUBLIC_BASE=https://media.ontold.com`, the `raineydavid/*` entries in
 `mint-allowed-repos.txt`. They are all env- or input-overridable; change them
 before pointing this at another account.
+
+
+### Both halves of two cross-language contracts
+
+`workers/mcp` carries two decisions that also exist in Python, and in both cases
+the agreement between them is the safety property:
+
+- **Consent.** `workers/mcp/src/consent.mjs` and `api/_consent.py` both decide
+  whether an agent may contact a vulnerable person. Neither owns the answers —
+  `shared/consentVectors.json` does, and both suites read it. Copying only the
+  JavaScript half would have meant an edit to the fixture that makes the edge
+  pass could no longer be caught, which is the exact drift the fixture exists to
+  prevent.
+- **Provenance.** `workers/mcp/src/provenance.mjs` shares a wire format with
+  `api/_provenance.py`; a record signed one side must verify on the other, which
+  rests on `canonical()` producing identical bytes (Python escapes non-ASCII to
+  `\uXXXX`, `JSON.stringify` does not).
+
+So `api/_consent.py`, `api/_provenance.py`, `api/_provenanceStore.py` and their
+tests came across too. All are stdlib-only. Both halves of both contracts now
+run here.
