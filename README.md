@@ -118,6 +118,26 @@ the edit:
 
 Everything else runs green as copied.
 
+## The request-file trigger, and why the imports are disarmed
+
+Most lanes trigger two ways: `workflow_dispatch`, and a `push:` watching one
+file in `.github/dispatch-requests/`. You run a lane by editing its request
+file — the diff *is* the authorisation record, which is the point.
+
+There is **no branch filter** on those push triggers. The initial import
+therefore touched every watched path at once and fired 25 workflows; all of
+them failed on missing secrets, so nothing acted. That is a one-time event —
+from here, only editing a given request file fires that lane.
+
+Four request files arrived mid-flight from ontold's real operations, still
+carrying `apply: true` and still pointed at the live `ontold.com` zone:
+`grant-email-permissions`, `provision-dmarc`, `r2-domain` and `switch-inbound`
+(that last one cuts over inbound MX). They have been flipped to
+`apply: false`, with the original request preserved in the `why` field. Adding
+secrets to this repo cannot now replay a production change by accident. Arm one
+deliberately when you mean it — the same disarm-after-the-write convention the
+source repo follows.
+
 ### Carried-over `ontold` defaults
 
 Several scripts default to ontold's own values — `R2_BUCKET=ontold-public`,

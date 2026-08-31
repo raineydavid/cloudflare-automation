@@ -1,1 +1,4 @@
-{"why":"Retry: the first apply put every group under the zone resource, so the account-scoped Email Routing Addresses groups did nothing. Split by each group's own scope.","apply":true}
+{
+  "why": "DISARMED ON EXTRACTION into cloudflare-automation. The original request is kept below for provenance; apply was flipped to false so that adding secrets to this repo cannot replay a live change against a production zone. Set apply=true deliberately when you mean it. ORIGINAL: Retry: the first apply put every group under the zone resource, so the account-scoped Email Routing Addresses groups did nothing. Split by each group's own scope.",
+  "apply": false
+}

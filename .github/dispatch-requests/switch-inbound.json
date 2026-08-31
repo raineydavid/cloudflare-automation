@@ -1,1 +1,6 @@
-{"zone":"ontold.com","provider":"mailgun.org","apply":true,"why":"confirmed: hello@ontold.com does not arrive via Mailgun while the identical setup on ontold.site delivers"}
+{
+  "zone": "ontold.com",
+  "provider": "mailgun.org",
+  "apply": false,
+  "why": "DISARMED ON EXTRACTION into cloudflare-automation. The original request is kept below for provenance; apply was flipped to false so that adding secrets to this repo cannot replay a live change against a production zone. Set apply=true deliberately when you mean it. ORIGINAL: confirmed: hello@ontold.com does not arrive via Mailgun while the identical setup on ontold.site delivers"
+}

@@ -1,6 +1,6 @@
 {
   "bucket": "ontold-public",
   "domain": "media.ontold.com",
-  "apply": true,
-  "why": "Retry the secret write with GITHUB_ORG set, and list every repository secret by name so the founder can see what is there rather than take my word."
+  "apply": false,
+  "why": "DISARMED ON EXTRACTION into cloudflare-automation. The original request is kept below for provenance; apply was flipped to false so that adding secrets to this repo cannot replay a live change against a production zone. Set apply=true deliberately when you mean it. ORIGINAL: Retry the secret write with GITHUB_ORG set, and list every repository secret by name so the founder can see what is there rather than take my word."
 }

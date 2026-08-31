@@ -1,1 +1,5 @@
-{"zone":"ontold.com","apply":true,"why":"the product domain has no DMARC on its apex; p=none is monitor-only and cannot affect delivery"}
+{
+  "zone": "ontold.com",
+  "apply": false,
+  "why": "DISARMED ON EXTRACTION into cloudflare-automation. The original request is kept below for provenance; apply was flipped to false so that adding secrets to this repo cannot replay a live change against a production zone. Set apply=true deliberately when you mean it. ORIGINAL: the product domain has no DMARC on its apex; p=none is monitor-only and cannot affect delivery"
+}
