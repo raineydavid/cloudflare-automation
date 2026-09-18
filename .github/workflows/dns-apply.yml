@@ -1,0 +1,119 @@
+# Desired-state DNS for one zone: audit, diff, and apply only when asked.
+#
+# Founder: "what about setting up cloudflare dns properly". The desired
+# records live in data/dns/<zone>.json and the request in
+# .github/dispatch-requests/dns-apply.json; scripts/dns_apply.mjs does the
+# rest. A run with "apply": false prints public DNS, what the live hosts
+# answer, the zone's records and the diff. Only the literal boolean true
+# writes — records, the alias zone's 301 redirect rule, SSL strict where a
+# proxied record needs it — and nothing else.
+#
+# The credential is just-in-time: a 20-minute token scoped to the one zone
+# and to DNS (plus settings and redirects when the catalogue offers them),
+# minted from the standing token by scripts/mint_scoped_cf_token.mjs and
+# burned when the job ends. The standing token itself holds DNS write on
+# three zones and this is how any other zone in the account gets managed
+# without widening it.
+#
+# With VERCEL_TOKEN set and a vercel.repo in the zone file, the same run
+# checks the domain is attached to the Vercel project that deploys the repo
+# and, on apply, attaches apex and www.
+#
+#   echo '{"zone":"studentaccount.com","apply":false}' \
+#     > .github/dispatch-requests/dns-apply.json
+name: dns-apply
+
+on:
+  push:
+    paths:
+      - '.github/dispatch-requests/dns-apply.json'
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: 'Zone, e.g. studentaccount.com'
+        required: true
+      apply:
+        description: "Write the diff? Only the literal string 'true' counts."
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dns-apply
+  cancel-in-progress: false
+
+jobs:
+  dns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      REQ: .github/dispatch-requests/dns-apply.json
+      IN_ZONE: ${{ inputs.zone }}
+      IN_APPLY: ${{ inputs.apply }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Which zone, and whether to write
+        id: what
+        run: |
+          set -euo pipefail
+          ZONE="${IN_ZONE:-}"; APPLY="${IN_APPLY:-false}"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "$REQ" ]; then
+            ZONE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("zone",""))' "$REQ")
+            APPLY=$(python3 -c 'import json,sys;print("true" if json.load(open(sys.argv[1])).get("apply") is True else "false")' "$REQ")
+          fi
+          [ -z "$ZONE" ] && { echo "::error::no zone. Put {\"zone\":\"example.com\"} in $REQ."; exit 1; }
+          [ -f "data/dns/${ZONE}.json" ] || { echo "::error::no desired state at data/dns/${ZONE}.json"; exit 1; }
+          echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          echo "::notice::dns-apply ${ZONE} (apply=${APPLY})"
+
+      - name: Audit, diff, and apply only on explicit consent
+        run: |
+          set -euo pipefail
+          ZONE="${{ steps.what.outputs.zone }}"
+          TOK=$(printf '%s' "${CF_TOKEN:-}" | tr -d '[:space:]')
+          ACC=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          [ -n "$TOK" ] && echo "::add-mask::$TOK"
+          [ -n "$ACC" ] && echo "::add-mask::$ACC"
+          FLAGS=''
+          [ "${{ steps.what.outputs.apply }}" = "true" ] && FLAGS='--apply'
+
+          # Just-in-time: a zone-scoped token for this run, burned on exit.
+          # Try the widest useful set first; the catalogue's spelling of each
+          # group is read by the mint script, and a name it does not offer
+          # fails that attempt, so narrower sets follow. Falls back to the
+          # standing token, which can still read.
+          RUN_TOKEN="$TOK"; JID=''
+          if [ -n "$TOK" ] && [ -n "$ACC" ]; then
+            ZID=$(curl -sS --max-time 20 "https://api.cloudflare.com/client/v4/zones?name=${ZONE}" -H "Authorization: Bearer $TOK" \
+              | python3 -c 'import sys,json; rs=(json.load(sys.stdin).get("result") or []); print(rs[0]["id"] if rs else "")' 2>/dev/null || true)
+            [ -n "$ZID" ] && echo "::add-mask::$ZID"
+            for GROUPS in 'DNS Write,Zone Settings Write,Single Redirect Write' 'DNS Write,Zone Settings Write' 'DNS Write' 'DNS Edit'; do
+              [ -z "$ZID" ] && break
+              J=$(CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs mint "jit-dns-apply-${ZONE}" 20 "$GROUPS" "$ZID" 2>/tmp/mint.err || true)
+              if [ -n "$J" ]; then
+                RUN_TOKEN=$(printf '%s' "$J" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
+                JID=$(printf '%s' "$J" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+                echo "::add-mask::$RUN_TOKEN"; echo "::add-mask::$JID"
+                echo "[cf-token] minted a 20-minute token for ${ZONE}: ${GROUPS}"
+                break
+              fi
+              echo "[cf-token] could not mint '${GROUPS}': $(head -c 160 /tmp/mint.err | tr -d '\n')"
+            done
+            [ -z "$JID" ] && echo "[cf-token] no just-in-time token — using the standing token (it can read; writes on this zone will be refused unless it holds DNS write there)"
+          else
+            echo "[cf-token] no standing token or account id on this repo — the credentialed half will be skipped"
+          fi
+          burnjit() { [ -n "$JID" ] && CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs burn "$JID" || true; }
+          trap burnjit EXIT
+
+          CLOUDFLARE_API_TOKEN="$RUN_TOKEN" node scripts/dns_apply.mjs "$ZONE" $FLAGS

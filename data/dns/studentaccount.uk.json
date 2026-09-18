@@ -1,0 +1,4 @@
+{
+  "_comment": "Alias of studentaccount.com: two proxied placeholder records and a 301 redirect rule to the .com. Nothing is served from this zone.",
+  "redirect_to": "studentaccount.com"
+}

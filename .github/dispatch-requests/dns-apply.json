@@ -1,0 +1,5 @@
+{
+  "zone": "studentaccount.com",
+  "apply": false,
+  "why": "Founder: 'what about setting up cloudflare dns properly'. studentaccount.com is proxied to something answering a Cloudflare challenge with no Vercel header; .org, .uk and .org.uk have no records at all. Dry run first: read the diff against data/dns/studentaccount.com.json, then set apply to true."
+}

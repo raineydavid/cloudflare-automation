@@ -1,0 +1,8 @@
+{
+  "_comment": "Student Account's front door. Vercel's own values: apex A 76.76.21.21, www CNAME cname.vercel-dns.com. DNS-only (grey cloud) so Vercel terminates TLS and serves its own edge; flip proxied to true only with the zone's SSL mode on Full (strict). dns-apply.yml reads this; nothing else does.",
+  "records": [
+    { "type": "A",     "name": "@",   "content": "76.76.21.21",          "proxied": false, "ttl": 1 },
+    { "type": "CNAME", "name": "www", "content": "cname.vercel-dns.com", "proxied": false, "ttl": 1 }
+  ],
+  "vercel": { "repo": "raineydavid/bounty-ai-craft", "attach": ["@", "www"] }
+}
