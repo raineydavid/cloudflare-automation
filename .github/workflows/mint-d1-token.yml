@@ -41,6 +41,13 @@ jobs:
       SECRET_NAME: CLOUDFLARE_API_TOKEN
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'

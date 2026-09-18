@@ -1,0 +1,140 @@
+# Deploy ontold-identity, provisioning what it binds to on the way.
+#
+# D1 and KV are created when missing and their ids written into
+# wrangler.toml for the deploy only; the placeholders in the tree never
+# ship. Secrets are pushed from the repository store when present and
+# never printed. The Durable Object migration rides with the deploy.
+name: deploy-identity
+
+on:
+  push:
+    paths:
+      - 'workers/identity/**'
+      - 'api/_identity.ts'
+      - 'api/_sso.ts'
+      - '.github/workflows/deploy-identity.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-identity
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      RAW_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Contract tests
+        run: npx vitest run workers/identity api/_identity api/_sso
+      - name: Resolve account id
+        id: preflight
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(printf '%s' "${RAW_ACCOUNT_ID:-}" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+          if [ -z "$ACCOUNT_ID" ] || [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Need CLOUDFLARE_API_TOKEN and a 32-hex account id in R2_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID."
+            exit 1
+          fi
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+      - name: Check the token can see the account
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -euo pipefail
+          if ! npx wrangler@4 whoami >/tmp/whoami.txt 2>&1; then
+            cat /tmp/whoami.txt
+            echo "::error::CLOUDFLARE_API_TOKEN cannot authenticate. This deploy needs a token with Workers Scripts:Edit, Workers KV Storage:Edit, D1:Edit, Workers Routes:Edit on the zone, and Account Settings:Read."
+            exit 1
+          fi
+      - name: Ensure id.ontold.com resolves
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(printf '%s' "${CF_API_TOKEN:-}" | tr -d '[:space:]')
+          ZONE_ID=$(curl -sS "https://api.cloudflare.com/client/v4/zones?name=ontold.com" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            | python3 -c 'import sys,json; r=json.load(sys.stdin).get("result") or [{}]; print(r[0].get("id",""))')
+          if [ -z "$ZONE_ID" ]; then echo "::warning::ontold.com zone not visible to this token; the route will not attach until it is"; exit 0; fi
+          existing=$(curl -sS "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=A&name=id.ontold.com" \
+            -H "Authorization: Bearer ${TOKEN}")
+          if printf '%s' "$existing" | python3 -c 'import sys,json; sys.exit(0 if (json.load(sys.stdin).get("result") or []) else 1)' 2>/dev/null; then
+            echo "::notice::id.ontold.com already resolves"; exit 0
+          fi
+          resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+            --data '{"type":"A","name":"id","content":"192.0.2.1","proxied":true,"comment":"ontold-identity worker route target"}')
+          if printf '%s' "$resp" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") else 1)' 2>/dev/null; then
+            echo "::notice::created proxied A record for id.ontold.com"
+          else
+            echo "::warning::could not create id.ontold.com ($(printf '%s' "$resp" | tr -d '\n' | cut -c1-200))"
+          fi
+      - name: Provision D1 and KV if missing
+        working-directory: workers/identity
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: |
+          set -euo pipefail
+          DB_ID=$(npx wrangler@4 d1 list --json | python3 -c 'import sys,json; s=sys.stdin.read(); s=s[s.find("["):] if "[" in s else "[]"; print(next((d["uuid"] for d in json.loads(s) if d["name"]=="ontold-identity"), ""))')
+          if [ -z "$DB_ID" ]; then
+            npx wrangler@4 d1 create ontold-identity >/dev/null
+            DB_ID=$(npx wrangler@4 d1 list --json | python3 -c 'import sys,json; s=sys.stdin.read(); s=s[s.find("["):] if "[" in s else "[]"; print(next((d["uuid"] for d in json.loads(s) if d["name"]=="ontold-identity"), ""))')
+          fi
+          KV_ID=$(npx wrangler@4 kv namespace list | python3 -c 'import sys,json; s=sys.stdin.read(); s=s[s.find("["):] if "[" in s else "[]"; print(next((n["id"] for n in json.loads(s) if n["title"].endswith("SESSIONS")), ""))')
+          if [ -z "$KV_ID" ]; then
+            npx wrangler@4 kv namespace create SESSIONS >/dev/null
+            KV_ID=$(npx wrangler@4 kv namespace list | python3 -c 'import sys,json; s=sys.stdin.read(); s=s[s.find("["):] if "[" in s else "[]"; print(next((n["id"] for n in json.loads(s) if n["title"].endswith("SESSIONS")), ""))')
+          fi
+          [ -n "$DB_ID" ] && [ -n "$KV_ID" ] || { echo "::error::could not create or find the D1 database and KV namespace — the token needs D1:Edit and Workers KV Storage:Edit"; exit 1; }
+          echo "::add-mask::$DB_ID"; echo "::add-mask::$KV_ID"
+          python3 - "$DB_ID" "$KV_ID" <<'PY'
+          import re, sys, pathlib
+          p = pathlib.Path("wrangler.toml"); s = p.read_text()
+          s = s.replace('database_id = "PROVISIONED_BY_DEPLOY"', f'database_id = "{sys.argv[1]}"')
+          s = s.replace('id = "PROVISIONED_BY_DEPLOY"', f'id = "{sys.argv[2]}"')
+          p.write_text(s)
+          PY
+      - name: Apply migrations
+        working-directory: workers/identity
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: npx wrangler@4 d1 migrations apply ontold-identity --remote
+      - name: Push secrets that are set
+        working-directory: workers/identity
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+          IDENTITY_HMAC_SECRET: ${{ secrets.IDENTITY_HMAC_SECRET }}
+          CLIENT_SECRET_SCREENING: ${{ secrets.IDENTITY_CLIENT_SECRET_SCREENING }}
+          CLIENT_SECRET_NATIONALFF: ${{ secrets.IDENTITY_CLIENT_SECRET_NATIONALFF }}
+          CLIENT_SECRET_WORKAIS: ${{ secrets.IDENTITY_CLIENT_SECRET_WORKAIS }}
+          LEDGER_SECRET: ${{ secrets.IDENTITY_LEDGER_SECRET }}
+          BYOK_KEY: ${{ secrets.IDENTITY_BYOK_KEY }}
+        run: |
+          set -euo pipefail
+          for NAME in IDENTITY_HMAC_SECRET CLIENT_SECRET_SCREENING CLIENT_SECRET_NATIONALFF CLIENT_SECRET_WORKAIS LEDGER_SECRET BYOK_KEY; do
+            VALUE="${!NAME:-}"
+            if [ -z "$VALUE" ]; then echo "::warning::$NAME not set in the repository; the worker will refuse until it is"; continue; fi
+            printf '%s' "$VALUE" | npx wrangler@4 secret put "$NAME" >/dev/null
+          done
+      - name: Deploy
+        working-directory: workers/identity
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.preflight.outputs.account_id }}
+        run: npx wrangler@4 deploy
+      - name: Probe
+        run: |
+          curl -sSf https://id.ontold.com/ | tee /dev/stderr | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("ok"); print("configured:", d.get("configured"))'

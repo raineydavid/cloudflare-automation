@@ -129,12 +129,17 @@ jobs:
           else
             echo "mcp=no" >> "$GITHUB_OUTPUT"
           fi
-          # The prefixed name is what wrangler.toml's comment used to
-          # claim. Nothing reads it, so a Worker carrying only that one
-          # is fail-closed while looking configured — worth naming
-          # rather than leaving to be rediscovered.
-          if printf '%s' "$HELD" | tr ' ' '\n' | grep -qx ONTOLD_MCP_TOKEN; then
-            echo "::warning::the Worker holds ONTOLD_MCP_TOKEN, which nothing reads. Delete it."
+          # A Worker secret that nothing reads is fail-closed while
+          # looking configured. This used to name the one leftover we
+          # knew about, but naming it meant the repository still spelled
+          # a brand-prefixed setting, which api/test_env_naming forbids
+          # everywhere — and the rule is right: a second name for a
+          # setting is somewhere for a stale value to hide. So the check
+          # is by SHAPE rather than by name, which also catches the next
+          # one instead of only the one we happened to remember.
+          STALE=$(printf '%s' "$HELD" | tr ' ' '\n' | grep -E '^[A-Z]+_(MCP|NOTIFY|SIGNING|ROOT)_' || true)
+          if [ -n "$STALE" ]; then
+            echo "::warning::the Worker holds prefixed secrets that nothing reads. Delete them: $STALE"
           fi
 
       - name: Decide
