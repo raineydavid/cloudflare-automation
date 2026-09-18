@@ -29,6 +29,19 @@
 #      fail before it ever reached a push. Naming the remote and branch
 #      explicitly removes that dependency.
 #
+# A third cause, found on 2026-09-01 and costing exactly what the
+# paragraph above warns about. render-brief spent twenty minutes and
+# five Seedance renders on the cat-and-dog cut, then:
+#
+#     error: cannot pull with rebase: You have unstaged changes.
+#     rebase failed — retrying the fetch
+#
+# on all five attempts. The commit-back stages four specific paths, so
+# anything ELSE the run touched stays unstaged, and `git pull --rebase`
+# refuses to start with a dirty tree. Every retry hit the same wall and
+# the paid clips were lost to the artifact. `--autostash` is the whole
+# fix: rebase does not care about files it is not rebasing.
+#
 # Usage:  bash scripts/git_push_retry.sh
 #         bash scripts/git_push_retry.sh || echo "::warning::..."
 #
@@ -62,7 +75,12 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   # Abort a half-finished rebase before trying again; a conflicted
   # rebase left in place makes every later attempt fail for a second,
   # more confusing reason.
-  if ! git pull --rebase "$REMOTE" "$BRANCH"; then
+  # --autostash because the caller staged only the paths it cares about
+  # and the rest of the working tree is none of the rebase's business.
+  # Without it a single unrelated modified file turns every retry into
+  # "cannot pull with rebase: You have unstaged changes" and the run
+  # loses whatever it just paid for.
+  if ! git pull --rebase --autostash "$REMOTE" "$BRANCH"; then
     git rebase --abort || true
     echo "rebase failed — retrying the fetch"
   fi

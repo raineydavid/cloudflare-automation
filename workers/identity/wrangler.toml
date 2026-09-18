@@ -1,0 +1,53 @@
+# ontold-identity — the one place a person signs in for every property.
+# On ontold.com: official things live on .com; .site is for what users
+# publish and for examples.
+#
+# Three stores, each for what only it can do:
+#   D1   accounts, login tokens, auth codes — rows that must survive
+#        and be queried by more than one key.
+#   KV   revocations — a tiny, hot, eventually-consistent read on every
+#        session check.
+#   DO   one object per subject: which sessions are live right now, and
+#        sign-out-everywhere as a single decision.
+#
+# `database_id` and the KV `id` are filled in by deploy-identity.yml
+# from the account the token can see; the placeholders never deploy.
+name = "ontold-identity"
+main = "src/index.mjs"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+routes = [
+  { pattern = "id.ontold.com/*", zone_name = "ontold.com" }
+]
+
+[[d1_databases]]
+binding = "IDENTITY"
+database_name = "ontold-identity"
+database_id = "PROVISIONED_BY_DEPLOY"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "PROVISIONED_BY_DEPLOY"
+
+[[durable_objects.bindings]]
+name = "SUBJECTS"
+class_name = "SubjectHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SubjectHub"]
+
+[[send_email]]
+name = "EMAIL"
+
+# Secrets, set by the deploy: IDENTITY_HMAC_SECRET (sessions),
+# CLIENT_SECRET_<AUDIENCE> (each property), LEDGER_SECRET (the gateway
+# asking about keys and reporting usage), BYOK_KEY (32 bytes, base64:
+# seals the provider keys people bring).
+[vars]
+MAIL_FROM = "sign-in@mail.ontold.com"
+
+[observability]
+enabled = true

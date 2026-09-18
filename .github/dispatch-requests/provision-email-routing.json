@@ -1,1 +1,4 @@
-{"why":"ontold.com now has no MX; enable routing and create hello@","scope":"account"}
+{
+  "why": "Three zones of twenty cannot receive: screeningstudio.com advertises MX at Cloudflare with Routing off, so mail to it is accepted by nothing; workais.com and lorrybus.com are off entirely. All twenty carry mail \u2014 some for clients, some for us as providers \u2014 so none should be silenced. --enable refuses to displace any zone that already receives.",
+  "scope": "account"
+}

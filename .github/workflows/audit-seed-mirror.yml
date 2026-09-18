@@ -1,0 +1,125 @@
+# Does storage actually hold every asset?
+#
+# Founder: *"we need to validate first before deleting anything"*, and
+# then, when the answer needed credentials this session does not have:
+# *"use github yml"*. The secrets are already here.
+#
+# api/watch serves LOCAL-FIRST — a file in the function bundle is read
+# from the bundle, and only what is absent redirects to storage. So the
+# repo copy is the serving path for anything still bundled, and the net
+# for everything else. Deleting it makes storage load-bearing. This
+# says, per file, whether storage can take the weight.
+#
+# READ ONLY. It never deletes, has no flag that would, and asks for one
+# ranged byte per object rather than pulling a 28MB film to check it
+# exists. Failing means "not proven safe" — the point is that it
+# reports rather than blesses, so a silent inability to reach storage
+# can never read as an all-clear.
+
+name: audit-seed-mirror
+
+on:
+  push:
+    paths:
+      - 'api/seed/manifest.json'
+      - 'scripts/audit_seed_mirror.py'
+  schedule:
+    # Weekly. Drift here is silent — an asset that never mirrored looks
+    # exactly like an asset nobody made yet.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No sparse-checkout here: this job's whole purpose is to compare
+      # what is on disk against what is in storage.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Audit
+        id: audit
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+        run: |
+          set +e
+          # Human-readable to the LOG, machine-readable to the file.
+          # A verdict that lives only in a step summary and an artifact
+          # cannot be read back from anywhere that only has the log —
+          # which is how the first run's answer went unread.
+          python3 scripts/audit_seed_mirror.py --json audit.json
+          echo "safe=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Report
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          r = json.loads(pathlib.Path('audit.json').read_text())
+          mb = r['bytesOnDisk'] / 1048576
+          print('## Seed mirror audit\n')
+          print(f"- **{r['onDisk']}** files on disk, {mb:.0f} MB")
+          print(f"  - {r['mbListed']:.0f} MB reachable through the manifest")
+          print(f"  - {r['mbUnlisted']:.0f} MB named by nothing, so unreachable either way")
+          print(f"- **{r['manifestEntries']}** manifest keys")
+          print(f"- **{r['storageChecked']}** checked against storage\n")
+
+          if r['storageUnavailable']:
+              print(f"> Storage was not reachable: {r['storageUnavailable']}")
+              print('> Nothing here says anything is safe to delete.\n')
+
+          for label, rows, why in (
+              ('Missing from storage', r['missingFromStorage'],
+               'Deleting these from the repo loses them.'),
+              ('Could not check', r.get('couldNotCheck') or [],
+               'Asked twice and storage did not answer. Unknown is not absence, '
+               'and it is not proof either.'),
+              ('Manifest entries with no file in the repo', r['danglingManifestEntries'],
+               'Either already published straight to storage, or a silent 404.'),
+              ('Files no manifest entry names', r['filesNoManifestEntryNames'],
+               'Invisible to /api/watch whether or not they are in the repo.'),
+          ):
+              if not rows:
+                  continue
+              print(f'### {label} — {len(rows)}\n\n{why}\n')
+              print('```')
+              for k in rows[:40]:
+                  print(k)
+              if len(rows) > 40:
+                  print(f'... and {len(rows) - 40} more')
+              print('```\n')
+
+          print('**SAFE TO DELETE**' if r['safeToDelete']
+                else '**NOT PROVEN SAFE TO DELETE** — resolve the above first')
+          PY
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: seed-mirror-audit
+          path: audit.json
+          retention-days: 30
+
+      # Deliberately does NOT fail the run. An asset that has not
+      # mirrored is worth seeing every week without turning the whole
+      # repository red, and the summary already says it plainly.
+      - name: Verdict
+        if: always()
+        run: |
+          if [ "${{ steps.audit.outputs.safe }}" = "0" ]; then
+            echo "::notice::storage holds every asset — deletion would be recoverable"
+          else
+            echo "::warning::not proven safe to delete — see the job summary"
+          fi

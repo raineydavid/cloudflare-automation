@@ -77,6 +77,25 @@ def _call(path: str, token: str, body: dict | None = None, method: str = "") -> 
         return {"success": False, "errors": [{"message": str(err)}]}
 
 
+def locals_wanted(argv: list[str]) -> list[str]:
+    """The local parts asked for, from any number of --ensure arguments.
+
+    Repeated, comma-separated or space-separated in one quoted value —
+    the workflow builds the list in Python and passes it as one word.
+    Deduplicated, because a duplicate would create a second rule for an
+    address that already has one.
+    """
+    out: list[str] = []
+    for i, arg in enumerate(argv):
+        if arg != "--ensure" or i + 1 >= len(argv):
+            continue
+        for part in argv[i + 1].replace(",", " ").split():
+            name = part.strip().lower().partition("@")[0]
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
 def rule_for(rules: list[dict], address: str) -> dict | None:
     """The existing rule that already delivers `address`, if any.
 
@@ -256,10 +275,7 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
     want_enable = "--enable" in argv
-    ensure = ""
-    if "--ensure" in argv:
-        at = argv.index("--ensure")
-        ensure = argv[at + 1] if at + 1 < len(argv) else ""
+    ensure = locals_wanted(argv)
 
     zones = _call(f"/zones?name={zone}", token)
     rows = zones.get("result") or []
@@ -345,10 +361,21 @@ def main(argv: list[str]) -> int:
         print(f"routing: ENABLED on {zone} ({why})")
         enabled = True
 
-    if not ensure:
-        return 0
+    worst = 0
+    for local in ensure:
+        rc = ensure_rule(token, zone, zone_id, rules, addresses, local, enabled)
+        worst = max(worst, rc)
+    return worst
 
-    wanted = f"{ensure}@{zone}"
+
+def ensure_rule(token: str, zone: str, zone_id: str, rules: list[dict],
+                addresses: list[dict], local: str, enabled: bool) -> int:
+    """Make one address on this zone reach a person. 0 when it does.
+
+    Appends what it creates to `rules`, so a list naming the same local
+    part twice does not end up with two rules for it.
+    """
+    wanted = f"{local}@{zone}"
 
     # ONE place decides whether a reply actually reaches anybody, at the
     # end, because every early return is a chance to report ready on a
@@ -377,6 +404,9 @@ def main(argv: list[str]) -> int:
         print(f"status:  NOT READY: {wanted} rule refused — "
               f"{json.dumps(made.get('errors') or [])[:200]}")
         return 1
+    rules.append({"matchers": [{"field": "to", "value": wanted}],
+                  "actions": [{"type": "forward", "value": [dest]}],
+                  "enabled": True})
     return verdict(enabled, zone, f"{wanted} forwards to {mask(dest)} ({why})")
 
 

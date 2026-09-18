@@ -1,6 +1,7 @@
 {
   "domain": "lorrybus.com",
   "slug": "lorrybus",
-  "reason": "Founder said yes to the custom-domain lane; lorrybus.com is the site it was asked for (task: serve custom hostnames so lorrybus.com works). This first run also creates the one-time zone plumbing (fallback record + fallback origin).",
-  "nonce": 1
+  "reason": "Re-fire after fixing the minter. Run 1 (2026-08-02) created fallback.ontold.site and then died on `10000: Authentication error` setting the SaaS fallback origin. That was read as a missing dashboard checkbox, and it was not: the just-in-time mint asks for 'SSL and Certificates Write', which is a ZONE permission group, and scripts/mint_scoped_cf_token.mjs read only the ACCOUNT permission-group catalogue and scoped every policy to the account. The name never resolved, the mint threw, the lane fell back to the standing token, and the standing token has no SSL rights. Both halves are fixed: both catalogues are read, and a zone id scopes the policy to the zone.",
+  "expected_now": "The mint should print `[cf-token] minted a 20-minute SSL and Certificates token for this run`, the fallback origin should be set, lorrybus.com registered as a custom hostname, and the run should end by printing the CNAME the domain owner sets: lorrybus.com -> fallback.ontold.site. If the mint is still refused, the log now carries Cloudflare's own reason rather than a guess.",
+  "nonce": 2
 }

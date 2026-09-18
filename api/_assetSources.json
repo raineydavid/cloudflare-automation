@@ -1,0 +1,23 @@
+{
+  "_note": "Places our own assets already live, that we want back. Founder: 'why do we need a separate thing for popcorn, why isnt it just url etc - worried why each new thing needs separate stuff'. Right — so adding a source is a ROW here, not a file. scripts/pull_source.py is the whole of the code and knows nothing about any particular vendor; everything below is configuration.",
+  "_shape": {
+    "id": "what to pass to --source",
+    "protocol": "mcp — the only one implemented. A vendor that speaks plain REST needs a second reader, and that is the point at which a new protocol earns new code (not a new vendor).",
+    "baseUrlEnv": "env var that overrides baseUrl, so a staging host needs no commit",
+    "baseUrl": "the published endpoint, as a default — same shape as RUNWARE_BASE_URL",
+    "keyEnv": "credentials tried in order; the first that resolves wins",
+    "auth": "bearer — how the key is presented",
+    "note": "what this source is and anything learned about it"
+  },
+  "sources": [
+    {
+      "id": "popcorn",
+      "protocol": "mcp",
+      "baseUrlEnv": "POPCORN_BASE_URL",
+      "baseUrl": "https://api.popcorn.co/mcp",
+      "keyEnv": ["POPCORN_CO_API_KEY", "INFERENCE_API_KEY_POPCORN", "POPCORN_API_KEY"],
+      "auth": "bearer",
+      "note": "Founder: assets generated there are ours to use as we like, and carry no branding of theirs. Their docs are refused by the agent egress proxy (CONNECT 403 at the gateway), so nothing about their tool names was written from documentation — the puller runs MCP discovery and uses what the server itself reports."
+    }
+  ]
+}

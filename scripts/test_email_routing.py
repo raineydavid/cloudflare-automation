@@ -14,7 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.email_routing import choose_destination, is_cloudflare_mx, mask, masked, may_enable, rule_for, verdict, verified  # noqa: E402
+from api._mail import HELLO, STANDARD_LOCALS  # noqa: E402
+from scripts.email_routing import choose_destination, is_cloudflare_mx, locals_wanted, mask, masked, may_enable, rule_for, verdict, verified  # noqa: E402
 
 ONE = [{"email": "a@x.test", "verified": "2026-01-01T00:00:00Z"}]
 TWO = ONE + [{"email": "b@x.test", "verified": "2026-01-02T00:00:00Z"}]
@@ -220,6 +221,39 @@ class Verdict(unittest.TestCase):
 
     def test_an_enabled_zone_is_ready(self):
         self.assertEqual(verdict(True, "a.test", "hello@a.test forwards to x@y.test"), 0)
+
+
+class LocalsWanted(unittest.TestCase):
+    """Every zone answers on a set of addresses, not just one."""
+
+    def test_one_quoted_value_carries_the_whole_set(self):
+        # How the workflow passes it: built in Python, one word.
+        self.assertEqual(locals_wanted(["z", "--ensure", "hello info support"]),
+                         ["hello", "info", "support"])
+
+    def test_repeated_and_comma_separated_both_work(self):
+        self.assertEqual(
+            locals_wanted(["--ensure", "hello,info", "--ensure", "abuse"]),
+            ["hello", "info", "abuse"])
+
+    def test_a_repeat_does_not_become_a_second_rule(self):
+        self.assertEqual(locals_wanted(["--ensure", "hello Hello hello@x.test"]),
+                         ["hello"])
+
+    def test_nothing_asked_for_is_an_empty_list(self):
+        self.assertEqual(locals_wanted(["zone.test", "--enable"]), [])
+
+
+class StandardSet(unittest.TestCase):
+    def test_the_reply_address_is_in_it(self):
+        # HELLO is what outbound mail asks people to reply to. If the
+        # standard set did not carry it, the one address we advertise
+        # would be the one nobody provisioned.
+        self.assertIn(HELLO.partition("@")[0], STANDARD_LOCALS)
+
+    def test_they_are_local_parts_not_addresses(self):
+        for name in STANDARD_LOCALS:
+            self.assertNotIn("@", name)
 
 
 if __name__ == "__main__":

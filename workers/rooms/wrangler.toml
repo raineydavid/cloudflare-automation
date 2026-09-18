@@ -1,0 +1,62 @@
+# ontold-rooms — several people watching the same thing, and seeing
+# where each other went.
+#
+# The clock half of this lives in the app (lib/broadcast): slots that
+# open and close at an instant everyone agrees on. This is the other
+# half — who is here, and which branch did they take.
+#
+# What crosses it: a display name, a branch id, a heartbeat. No video,
+# no audio, no chat, no account, no address. It is cheap because
+# nothing expensive passes through it.
+#
+# Setup, once:
+#   npx wrangler deploy          (from this directory)
+#
+# No R2, no D1, no KV. A room is a Durable Object and nothing else —
+# its whole state is who is in it, and that is worthless five minutes
+# after everybody leaves.
+
+name = "ontold-rooms"
+main = "src/index.mjs"
+compatibility_date = "2026-08-01"
+
+# Off, or the Worker is also published on the account's platform
+# subdomain: a second public door onto the same rooms, on a hostname we
+# do not own. Same rule the site host follows.
+workers_dev = false
+
+# An ORIGIN, not an address.
+#
+# Founder: *"why us rooms on a separate site? i thought .site was for
+# UGC"*, then *"we might want to reserve some high value names anyway
+# and have min lengths"*, then *"the users should be none the wiser"*.
+# Three notes, and together they settle where this lives.
+#
+# `rooms` is now RESERVED in the site host, so no user can claim it and
+# publish a site here — that was the real hazard, and it is closed. The
+# hostname below is never shown to anybody: vercel.json rewrites
+# /api/rooms/* to it, exactly as the festival directory reaches its
+# Worker through /api/, and services/room ships a RELATIVE path — so
+# this name is not merely unadvertised, it is absent from the
+# JavaScript a visitor downloads.
+#
+# Because the client knows only a path, this can move to the app zone
+# later by editing one line of vercel.json, with no client change and
+# no cache to wait out.
+routes = [
+  { pattern = "rooms.ontold.site/*", zone_name = "ontold.site" }
+]
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# SQLite-backed, which is the current default for new namespaces and
+# the cheaper one: a room holds a handful of viewers and a timestamp,
+# not a document.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[observability]
+enabled = true

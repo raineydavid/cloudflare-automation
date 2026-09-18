@@ -1,3 +1,4 @@
 {
-  "why": "Existing ontold email has stopped working. Read-only estate check: which zones can still send, which can still receive, and what changed."
+  "why": "Read the estate again. Red since 29 August, and the verdict was only visible by opening the run in a browser: the report goes to the step summary, which the API does not expose, above an artifact upload that buries the log tail. Printed last now. Read-only, changes nothing.",
+  "nonce": 1
 }

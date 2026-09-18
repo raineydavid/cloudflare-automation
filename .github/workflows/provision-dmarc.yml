@@ -60,6 +60,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v6
 
       - name: Which zone, and whether to write

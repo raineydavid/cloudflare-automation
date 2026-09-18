@@ -44,6 +44,13 @@ jobs:
       FALLBACK_HOST: fallback.ontold.site
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'
@@ -118,9 +125,20 @@ jobs:
           fi
           echo "[zone] ${DOMAIN} is not a zone in our account - taking the customer-domain (SaaS) path"
 
+          # The zone comes FIRST now, because the SSL token is scoped to
+          # it. 'SSL and Certificates Write' is a ZONE permission group,
+          # and a zone group in an account-scoped policy is not a
+          # narrower grant — it is an invalid one. Resolving the zone
+          # needs only Zone Read, which the standing token has had since
+          # 2026-07-25.
+          ZID=$(zone_id "$ZONE_NAME")
+          [ -z "$ZID" ] && { echo "::error::cannot resolve the ${ZONE_NAME} zone"; exit 1; }
+          echo "::add-mask::$ZID"
+          echo "[zone] resolved ${ZONE_NAME}"
+
           # Just-in-time credential for the SSL/custom-hostname calls:
-          # minted for 20 minutes, burned on exit. If minting is
-          # refused, the base token is tried as-is.
+          # minted for 20 minutes, scoped to this zone, burned on exit.
+          # If minting is refused, the base token is tried as-is.
           ACC=$(printf '%s' "${ACCOUNT_RAW:-}" | grep -oiE '[0-9a-f]{32}' | head -1)
           STOK="$TOK"; JID=''
           if [ -n "$ACC" ]; then
@@ -130,7 +148,7 @@ jobs:
             # origin with no clue whether the base token lacked SSL
             # rights or the mint had been declined upstream. Two
             # different grants, one indistinguishable failure. Keep it.
-            J=$(CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs mint jit-attach-domain 20 'SSL and Certificates Write' 2>/tmp/mint.err || true)
+            J=$(CLOUDFLARE_API_TOKEN="$TOK" CF_ACCOUNT_ID="$ACC" node scripts/mint_scoped_cf_token.mjs mint jit-attach-domain 20 'SSL and Certificates Write' "$ZID" 2>/tmp/mint.err || true)
             [ -s /tmp/mint.err ] && echo "[cf-token] mint said: $(head -c 300 /tmp/mint.err)"
             if [ -n "$J" ]; then
               STOK=$(printf '%s' "$J" | jq -r .value); JID=$(printf '%s' "$J" | jq -r .id)
@@ -144,11 +162,7 @@ jobs:
           trap burnjit EXIT
 
           # ── CUSTOMER-DOMAIN (SaaS) PATH ────────────────────────────
-          # Zone id (the token has Zone Read since 2026-07-25).
-          ZID=$(zone_id "$ZONE_NAME")
-          [ -z "$ZID" ] && { echo "::error::cannot resolve the ${ZONE_NAME} zone"; exit 1; }
-          echo "::add-mask::$ZID"
-          echo "[zone] resolved ${ZONE_NAME}"
+          # Zone already resolved above — the SSL token is scoped to it.
 
           # 1a. The originless fallback record (idempotent; DNS Write held).
           HAVE=$(curl -sS --max-time 20 "$API/zones/$ZID/dns_records?name=${FALLBACK_HOST}&type=AAAA" \

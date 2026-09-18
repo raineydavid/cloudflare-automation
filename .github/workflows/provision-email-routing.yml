@@ -76,20 +76,45 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v6
 
       # The zone and the local part both come from what the Worker
       # actually replies as, so this cannot route an address nothing
       # sends from. Same rule as the sending side: the address and its
       # configuration are one decision.
-      - name: Which address do we ask people to reply to?
+      - name: Which addresses should reach a person?
         id: reply
+        env:
+          # Personal and per-domain addresses, comma separated. A
+          # variable rather than a literal: they are real people's names
+          # and do not belong in a diff.
+          MAIL_ALIASES: ${{ vars.MAIL_ALIASES }}
         run: |
           set -euo pipefail
           REPLY_TO=$(python3 -c 'from api._mail import HELLO; print(HELLO)')
           echo "[reply] outbound mail says reply to $REPLY_TO"
-          echo "local=${REPLY_TO%@*}" >> "$GITHUB_OUTPUT"
           echo "zone=${REPLY_TO#*@}" >> "$GITHUB_OUTPUT"
+          LOCALS=$(python3 - <<'PY'
+          import os
+          from api._mail import HELLO, STANDARD_LOCALS
+          extra = os.environ.get("MAIL_ALIASES", "").replace(",", " ").split()
+          out = []
+          for name in [HELLO.partition("@")[0], *STANDARD_LOCALS, *extra]:
+              name = name.strip().lower().partition("@")[0]
+              if name and name not in out:
+                  out.append(name)
+          print(" ".join(out))
+          PY
+          )
+          echo "[reply] ensuring: $LOCALS"
+          echo "locals=$LOCALS" >> "$GITHUB_OUTPUT"
 
       - name: Resolve account id
         id: preflight
@@ -142,7 +167,7 @@ jobs:
           # without the code changing, and it should not be in a diff.
           MAIL_DESTINATION: ${{ vars.MAIL_DESTINATION }}
           ZONE: ${{ steps.reply.outputs.zone }}
-          LOCAL: ${{ steps.reply.outputs.local }}
+          LOCALS: ${{ steps.reply.outputs.locals }}
         run: |
           # `set +e` deliberately, and it is the whole reason this loop
           # works. GitHub runs steps under `bash -e`, so the first zone
@@ -164,7 +189,8 @@ jobs:
             [ -z "$Z" ] && continue
             { echo ""; echo "### $Z"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             if [ "$APPLY" = "0" ]; then
-              python3 scripts/email_routing.py "$Z" | tee -a "$GITHUB_STEP_SUMMARY"
+              python3 scripts/email_routing.py "$Z" | tee -a /tmp/routing.txt \
+                | tee -a "$GITHUB_STEP_SUMMARY"
             else
               # --enable is guarded by the zone's own MX: it proceeds only
               # when nothing receives for the domain, and refuses when
@@ -172,7 +198,8 @@ jobs:
               # incumbent, and that is a fact about the zone rather than a
               # judgement made here. That guard is what makes the
               # estate-wide form safe to run at all.
-              python3 scripts/email_routing.py "$Z" --enable --ensure "$LOCAL" | tee -a "$GITHUB_STEP_SUMMARY"
+              python3 scripts/email_routing.py "$Z" --enable --ensure "$LOCALS" \
+                | tee -a /tmp/routing.txt | tee -a "$GITHUB_STEP_SUMMARY"
             fi
             RC=$?
             echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -191,3 +218,11 @@ jobs:
             fi
           done < /tmp/zones.txt
           exit $WORST
+
+      # LAST. The per-zone verdict goes to the step summary, which the
+      # REST API does not expose, so a failed run could only be read by
+      # opening it in a browser — which is how two failures from August
+      # went undiagnosed. Same fix as mail-estate.
+      - name: The verdict, where it can be read
+        if: always()
+        run: tail -60 /tmp/routing.txt || echo "(no zone was reported on)"

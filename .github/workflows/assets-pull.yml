@@ -1,0 +1,129 @@
+# Bring assets we already own home into R2, from wherever they live.
+#
+# ONE workflow for every source, not one per supplier. The sources are
+# rows in api/_assetSources.json and `source` below picks one; adding
+# the next place we have assets is a row and a secret, and touches
+# neither this file nor the script.
+#
+# Runs here rather than anywhere else for two reasons, both hard: the
+# keys live in this repo's secrets, and an agent container's egress
+# proxy refuses these hosts outright (CONNECT 403 at the gateway). So
+# this is the only place the call can be made at all.
+#
+# Dispatch-only. Nothing about a push means "go and copy a few hundred
+# files", and a schedule would keep pulling long after the migration
+# is done.
+name: assets-pull
+
+on:
+  # A dispatch resolves against the DEFAULT branch, so on a feature
+  # branch this could not be fired at all — which is why our own assets
+  # have never once been pulled. The request file is the door.
+  push:
+    paths:
+      - '.github/dispatch-requests/assets-pull.json'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'source id — a row in api/_assetSources.json'
+        default: popcorn
+      mode:
+        description: 'discover (ask what the API offers) | dry-run | pull'
+        type: choice
+        options: [discover, dry-run, pull]
+        default: discover
+      tool:
+        description: 'listing tool to call (blank = pick from discovery)'
+        default: ''
+      detail:
+        description: 'tool that fetches one record, when the listing gives only ids'
+        default: ''
+      limit:
+        description: 'how many to mirror (0 = everything)'
+        default: '5'
+
+permissions:
+  contents: write
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # DISCOVER FIRST, always. The docs are unreachable from where this
+      # was written, so the tool names came from the server or from
+      # nowhere. A run that guesses a name fails with the key in hand.
+      - name: Pull
+        env:
+          # One line per source's credential. The script reads whichever
+          # names the chosen row lists, so an unset one is simply a
+          # source that cannot run today, not a broken workflow.
+          POPCORN_CO_API_KEY: ${{ secrets.POPCORN_CO_API_KEY }}
+          IN_SOURCE: ${{ github.event.inputs.source }}
+          IN_MODE:   ${{ github.event.inputs.mode }}
+          IN_LIMIT:  ${{ github.event.inputs.limit }}
+          IN_TOOL:   ${{ github.event.inputs.tool }}
+          IN_DETAIL: ${{ github.event.inputs.detail }}
+          # The same chain seed-r2.yml resolves, because half of it is
+          # how that job has been working: R2_BUCKET exists only as an
+          # environment secret, invisible here, so the name is the
+          # literal default there and has to be one here too.
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: |
+          f=.github/dispatch-requests/assets-pull.json
+          get() { [ -f "$f" ] && jq -r ".$1 // empty" "$f" || true; }
+          SOURCE="${IN_SOURCE:-$(get source)}"; SOURCE="${SOURCE:-popcorn}"
+          MODE="${IN_MODE:-$(get mode)}";       MODE="${MODE:-discover}"
+          LIMIT="${IN_LIMIT:-$(get limit)}";    LIMIT="${LIMIT:-5}"
+          TOOL="${IN_TOOL:-$(get tool)}"
+          DETAIL="${IN_DETAIL:-$(get detail)}"
+          echo "SOURCE=$SOURCE" >> "$GITHUB_ENV"
+          echo "source=$SOURCE mode=$MODE limit=$LIMIT" 
+          ARGS=""
+          case "$MODE" in
+            discover) ARGS="--discover" ;;
+            dry-run)  ARGS="--dry-run" ;;
+            pull)     if [ "$LIMIT" = "0" ]; then ARGS="--all"; else ARGS="--limit $LIMIT"; fi ;;
+          esac
+          if [ -n "$TOOL" ]; then ARGS="$ARGS --tool $TOOL"; fi
+          if [ -n "$DETAIL" ]; then ARGS="$ARGS --detail $DETAIL"; fi
+          # A missing credential fails inside the script, which names
+          # every variable that would fix it — better than a shell test
+          # that only knows about one of them.
+          PYTHONPATH=. python3 scripts/pull_source.py --source "$SOURCE" $ARGS
+
+      # What the server said it can do, and what landed. Committed so the
+      # next run starts from a known API instead of rediscovering it, and
+      # so the manifest is readable without opening a job log.
+      - name: Commit what we learned
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # One pathspec at a time. `git add a b c` where b and c do not
+          # exist aborts and stages NOTHING — which is how a run that
+          # discovered 13 tools committed none of them.
+          for part in tools library assets; do
+            p="api/_sources/${SOURCE}-${part}.json"
+            [ -f "$p" ] && git add "$p"
+          done
+          git add api/seed/manifest.json 2>/dev/null || true
+          git diff --cached --quiet && echo "nothing new" && exit 0
+          git commit -m "${SOURCE}: assets-pull run"
+          bash scripts/git_push_retry.sh

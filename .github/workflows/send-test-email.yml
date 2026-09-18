@@ -45,6 +45,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v6
 
       # BEFORE the send, because it is the thing that explains a refusal
@@ -76,7 +83,7 @@ jobs:
           # Same order api/_mail resolves them in. NOTIFY_TOKEN first,
           # so mail stops depending on the value that also governs /mcp.
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          MCP_TOKEN: ${{ secrets.MCP_TOKEN || secrets.ONTOLD_MCP_TOKEN }}
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           ROOT_SECRET: ${{ secrets.ROOT_SECRET }}
           SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
           NOTIFY_URL: ${{ vars.NOTIFY_URL }}

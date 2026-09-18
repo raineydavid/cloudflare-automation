@@ -1,0 +1,74 @@
+# Upload exactly the assets the audit found missing from storage.
+#
+# Founder: *"get the 2 files in then"*, and *"no deletions"*.
+#
+# The full mirror is a directory-wide sync that only fires on a push
+# under api/seed. Two trend images the home page renders were committed
+# by a minting lane and never mirrored, and no push has touched api/seed
+# since. This closes a known gap without walking 700MB to do it.
+#
+# UPLOADS ONLY. The script has no flag that deletes, skips any key that
+# already has an object, and stops rather than pushing more than a
+# couple of dozen files — a long missing list is a mirror problem, not
+# an upload job.
+
+name: mirror-missing
+
+on:
+  push:
+    paths:
+      - 'scripts/push_missing_to_storage.py'
+      - 'scripts/audit_seed_mirror.py'
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Upload (unticked = say what it would do)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Needs the real files, so no sparse checkout.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Upload what is missing
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+        run: |
+          # A push to the script uploads. The dispatch input can hold it
+          # to a dry run; literal 'false' is the only thing that does,
+          # so an empty or misspelled value uploads rather than silently
+          # doing nothing on a run somebody asked for.
+          if [ "${{ github.event.inputs.push }}" = "false" ]; then
+            python3 scripts/push_missing_to_storage.py
+          else
+            python3 scripts/push_missing_to_storage.py --push
+          fi
+
+      # Proof, not assertion: re-ask storage after uploading. A run that
+      # says it uploaded and an audit that still says missing is the
+      # disagreement worth catching in the same job.
+      - name: Re-audit
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID     || secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY || secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID:         ${{ secrets.R2_ACCOUNT_ID        || secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET            || secrets.CLOUDFLARE_R2_BUCKET || 'ontold-projects-prod' }}
+        run: |
+          set +e
+          python3 scripts/audit_seed_mirror.py
+          echo "safe=$?" >> "$GITHUB_OUTPUT"
+          set -e

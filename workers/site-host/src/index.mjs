@@ -52,8 +52,62 @@ export { notFoundPage, claimUrl, UNCLAIMED_MARKER, addressState, statusFor, mark
  *  floor for before that first publish exists. */
 export const ROOT_SITE = '__root';
 
-/** Slugs a visitor may never claim by registering a subdomain. */
-const RESERVED = new Set([ROOT_SITE, 'www']);
+/**
+ * The shortest slug anybody may claim.
+ *
+ * Founder: *"we might want to reserve some high value names anyway and
+ * have min lengths"*. One- and two-character subdomains are the
+ * high-value end of any namespace — they are what gets squatted, resold
+ * and used to impersonate — and giving them away first-come is the one
+ * decision that cannot be undone later.
+ *
+ * Applied to CLAIMING only, deliberately. slugFromHost still resolves a
+ * short slug, so anything already published keeps serving; this closes
+ * the door without evicting whoever is already through it.
+ */
+export const MIN_SLUG = 3;
+
+/**
+ * Slugs a visitor may never claim by registering a subdomain.
+ *
+ * Two kinds, and the second kind is why this list grew.
+ *
+ * **Ours already.** `mcp.ontold.site` has been a live Worker route for
+ * months while `mcp` stayed a claimable slug — so a user could have
+ * published a site at the exact hostname an internal service answers
+ * on. Found by the guard in arch/ugcZoneIsForUsers.test.ts, written
+ * after a rooms Worker nearly took `rooms.ontold.site` the same way.
+ *
+ * **Ours eventually, or nobody's.** The names every hosted namespace
+ * ends up needing — mail, admin, status, login, billing — plus the ones
+ * that let a stranger look like us to somebody else's browser. Cheap to
+ * hold now; a migration to take back later.
+ *
+ * Reserving is not the same as routing: a reserved name simply cannot
+ * become a user's site. Anything of ours that wants one still has to
+ * claim it explicitly, on its own Worker route.
+ */
+const RESERVED = new Set([
+  ROOT_SITE,
+  // The front door and the obvious aliases for it.
+  'www', 'ontold', 'root', 'home',
+  // Live or planned infrastructure on this zone.
+  'mcp', 'rooms', 'id', 'fallback', 'api', 'app', 'cdn', 'media', 'assets',
+  'static', 'files', 'img', 'images', 'stream', 'live',
+  // Mail. A stranger sending as us is the expensive version of this.
+  'mail', 'smtp', 'imap', 'pop', 'mx', 'email', 'postmaster', 'webmaster',
+  'abuse', 'noreply', 'no-reply',
+  // Anything a browser would trust because of its name.
+  'login', 'signin', 'auth', 'account', 'accounts', 'admin', 'billing',
+  'pay', 'payment', 'payments', 'checkout', 'secure', 'security', 'verify',
+  // Environments, which read as ours whatever they serve.
+  'dev', 'staging', 'stage', 'test', 'preview', 'demo', 'sandbox', 'beta',
+  // The places people look for us.
+  'status', 'docs', 'help', 'support', 'blog', 'news', 'about', 'legal',
+  'privacy', 'terms',
+  // DNS itself.
+  'ns', 'ns1', 'ns2', 'dns',
+]);
 
 /** Extract the site slug from a request Host header. Returns null for
  *  the apex, www, reserved names, or a host outside ontold.site. */
@@ -220,12 +274,84 @@ export function slugsFromPrefixes(prefixes) {
     .filter(slugValid);
 }
 
-/** Is this string a claimable site slug (a valid label, not reserved)? */
+/**
+ * Our name, for the impersonation check below.
+ *
+ * A constant rather than a literal in one function, because the day
+ * this changes it must change everywhere at once.
+ */
+export const BRAND = 'ontold';
+
+/**
+ * A slug flattened the way somebody trying to look like us would spell
+ * it: separators dropped, and the digits that stand in for letters put
+ * back.
+ *
+ * `on-told`, `0nt0ld` and `ont01d` all read as us in a browser's
+ * address bar at a glance, which is the only place this matters.
+ */
+function flatten(slug) {
+  return String(slug)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/0/g, 'o')
+    .replace(/[1|]/g, 'l')
+    .replace(/3/g, 'e')
+    .replace(/4/g, 'a')
+    .replace(/5/g, 's');
+}
+
+/**
+ * Does this slug claim to be us?
+ *
+ * Founder: *"also not ontold.ontold.site or anything with our name in
+ * url as long as its not by us"*. Reserving the exact word is not
+ * enough — `my-ontold`, `ontold-support` and `getontold` all put our
+ * name in a hostname somebody else controls, and `ontold-billing` in an
+ * address bar is a phishing page with our reputation behind it.
+ *
+ * A substring rule, on the flattened form, so the near-misses go too.
+ */
+export function claimsOurName(slug) {
+  return flatten(slug).includes(BRAND);
+}
+
+/**
+ * Is this string a claimable site slug?
+ *
+ * A valid DNS label, long enough, not reserved, and not pretending to
+ * be us. RESERVED is checked before the brand rule so our own names
+ * stay ours — a reserved slug is one only we can be given, which is the
+ * "as long as its not by us" half.
+ */
 export function slugValid(slug) {
   return typeof slug === 'string'
+    && slug.length >= MIN_SLUG
     && !RESERVED.has(slug)
+    && (!claimsOurName(slug) || ours(slug))
     && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug);
 }
+
+/**
+ * Slugs carrying our name that ARE ours — the "as long as its not by
+ * us" half of the rule.
+ *
+ * Only the deploy smoke test today. It publishes `ontold-smoke-<n>`
+ * on every deploy to prove the Worker serves, and that name is chosen
+ * to be obviously ours; refusing it would break the check that tells
+ * us the site host works.
+ *
+ * A prefix WE mint, not a name a visitor can ask for: nothing in the
+ * publish path lets a caller choose one, and if that ever changes this
+ * function is the thing to look at first.
+ */
+function ours(slug) {
+  return String(slug).startsWith(SMOKE_PREFIX);
+}
+
+/** The reserved names, for anything that needs to check or show them.
+ *  A copy: the set itself is not somebody else's to edit. */
+export const reservedSlugs = () => new Set(RESERVED);
 
 /** R2 object key for a request path within a site. '/' → index.html;
  *  a path with an extension maps to the stored asset; extensionless

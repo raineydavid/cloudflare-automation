@@ -1,0 +1,8 @@
+{
+  "why": "Held. All 19 are mirrored and registered; re-running would re-download 470MB for nothing. Change mode when there is a new source or new work to fetch.",
+  "source": "popcorn",
+  "mode": "dry-run",
+  "tool": "list_movies",
+  "detail": "get_movie",
+  "limit": "25"
+}

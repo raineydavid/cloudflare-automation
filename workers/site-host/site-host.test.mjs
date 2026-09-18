@@ -1143,11 +1143,25 @@ describe('the network sitemap advertises real sites only', () => {
   });
 
   it('keeps a customer site whose name merely resembles one', () => {
-    // The rule is a prefix, not a substring — a real business called
-    // "smoke-house" is a customer.
+    // The smoke rule is a prefix, not a substring — a real business
+    // called "smoke-house" is a customer.
     expect(listable('smoke-house')).toBe(true);
-    expect(listable('ontold-smoker')).toBe(true);
     expect(listable(`${SMOKE_PREFIX}9`)).toBe(false);
+  });
+
+  it('but a customer may not put OUR name in their slug', () => {
+    // This assertion used to read `listable('ontold-smoker') === true`,
+    // as an example of a customer the smoke-prefix rule must not catch.
+    // The founder's rule overturns it deliberately: *"also not
+    // ontold.ontold.site or anything with our name in url as long as
+    // its not by us"*. `ontold-smoker.ontold.site` is our name on a
+    // hostname somebody else controls, and the smoke prefix was never
+    // the reason to refuse it.
+    expect(listable('ontold-smoker')).toBe(false);
+    expect(slugValid('ontold-smoker')).toBe(false);
+    // Ours still works: the deploy publishes this on every run to
+    // prove the Worker serves, and refusing it would break the check.
+    expect(slugValid(`${SMOKE_PREFIX}1`)).toBe(true);
   });
 
   it('matches the slug the deploy workflow actually publishes', async () => {

@@ -33,9 +33,35 @@ name: Seed assets to Cloudflare R2
 
 on:
   workflow_dispatch:
+  # Callable, so a lane that mints an asset can sync it in the same
+  # run instead of hoping a chained trigger fires. See the note on
+  # workflow_run below for why hoping was not enough.
+  workflow_call:
   push:
     paths:
       - 'api/seed/**'
+  # A lane that MINTS an asset commits it back with the default token,
+  # and GitHub does not fire workflows for those pushes — that is the
+  # recursion guard, and it means every generated asset was landing in
+  # git and never reaching R2 until some later human push happened to
+  # touch api/seed. The sync walks the whole tree rather than a
+  # changed-files list, which is what lets a run after a minting lane
+  # also clear whatever the gap left behind. It does not RE-UPLOAD the
+  # tree: `--size-only` means only what R2 does not already hold at that
+  # size goes over the wire, which is why a run is under a minute
+  # against 721MB.
+  #
+  # That guard only half worked, and the half it missed is the half we
+  # develop on: workflow_run fires only for the workflow file on the
+  # DEFAULT branch. Every mint on a feature branch therefore committed
+  # its asset and mirrored nothing. Two trend images the home page
+  # actually renders sat in git and not in storage for that reason —
+  # serving only because api/watch reads them out of its own bundle.
+  # Kept, because it is right on the default branch; the minting lanes
+  # now also call this workflow directly, which works on any branch.
+  workflow_run:
+    workflows: [mint-covers, score-clip, mint-team]
+    types: [completed]
 
 jobs:
   upload:

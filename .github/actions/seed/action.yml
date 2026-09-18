@@ -1,0 +1,88 @@
+# Put api/seed on disk from storage, instead of from git.
+#
+# Founder: *"but we can just alias api/seed right with r2"*.
+#
+# Yes, and it is the cheaper answer by a distance. The alternative was
+# moving 719MB into asset repositories and rewriting the 28 workflows
+# that read the folder. This changes those 28 by one step each and
+# leaves every path below it alone: the scripts still open
+# api/seed/<x>, because api/seed/<x> is still there.
+#
+# What it buys, beyond not doing the migration:
+#
+#   * a job takes the SLICE it needs. mint-covers wants covers, not
+#     280MB of alternate cuts. Today every one of them pays for the
+#     whole folder at checkout because git has no partial.
+#   * the folder can leave git without any of them noticing, which is
+#     the thing that actually shrinks the repository.
+#   * storage egress to Actions is not billed, and a checkout that no
+#     longer carries the seed is smaller for all 106 workflows.
+#
+# manifest.json is NOT fetched here. It is the index, it is small, it
+# ships inside the Vercel function, and it belongs in git — the mirror
+# has always excluded it for the same reason.
+
+name: seed
+description: Hydrate api/seed from object storage, whole or in part.
+
+inputs:
+  prefix:
+    description: >
+      Which slice, relative to api/seed — 'cast', 'examples',
+      '_briefs/_out/suite-dreams'. Blank fetches everything, which is
+      almost never what a job needs; name the slice.
+    required: false
+    default: ''
+  optional:
+    description: >
+      'true' to carry on when storage is unreachable. For a job that
+      can still do something useful with a partial folder. Default is
+      to fail, because a render that quietly runs against no source is
+      worse than one that stops.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch from storage
+      shell: bash
+      run: |
+        set -eo pipefail
+        # Same credential shape as seed-r2, read from the caller's env
+        # so this action never names a secret of its own.
+        if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+          if [ "${{ inputs.optional }}" = "true" ]; then
+            echo "::warning::storage not configured — api/seed left as checked out"
+            exit 0
+          fi
+          echo "::error::storage credentials missing, so api/seed cannot be hydrated."
+          exit 1
+        fi
+        # The secret holds whatever was pasted; the id is 32 hex chars.
+        ACCOUNT=$(printf '%s' "$R2_ACCOUNT_ID" | grep -oiE '[0-9a-f]{32}' | head -1 || true)
+        if [ -z "$ACCOUNT" ]; then
+          echo "::error::R2_ACCOUNT_ID contains no 32-hex account id."
+          exit 1
+        fi
+        echo "::add-mask::$ACCOUNT"
+
+        PREFIX="${{ inputs.prefix }}"
+        PREFIX="${PREFIX#/}"; PREFIX="${PREFIX%/}"
+        SRC="s3://${R2_BUCKET}/assets"
+        DST="api/seed"
+        if [ -n "$PREFIX" ]; then SRC="$SRC/$PREFIX"; DST="$DST/$PREFIX"; fi
+        mkdir -p "$DST"
+
+        # --size-only: these are immutable renders, and a timestamp
+        # comparison would re-pull the lot on every run.
+        aws s3 sync "$SRC" "$DST" \
+          --endpoint-url "https://${ACCOUNT}.r2.cloudflarestorage.com" \
+          --no-progress --size-only | tee /tmp/seed-sync.log
+
+        n=$(grep -c '^download:' /tmp/seed-sync.log || true)
+        echo "::notice::hydrated ${DST} — ${n} object(s)"
+        {
+          echo "### Seed hydrated from storage"
+          echo "- \`${DST}\` ← ${n} object(s)"
+        } >> "$GITHUB_STEP_SUMMARY"

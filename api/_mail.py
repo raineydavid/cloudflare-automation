@@ -100,6 +100,17 @@ def mail_zone() -> str:
 #: get a bounce from a mailbox nobody reads.
 HELLO = f"hello@{MAIL_ZONE}"
 
+#: Addresses every zone we own should answer on.
+#:
+#: Named rules rather than a catch-all: a catch-all forwards whatever
+#: the internet addresses to the domain into a person's inbox.
+#:
+#: Personal and per-domain ones do not belong in a diff — set the
+#: MAIL_ALIASES repository variable and provision-email-routing adds
+#: them to this list.
+STANDARD_LOCALS = ("hello", "info", "support", "contact", "admin",
+                   "abuse", "postmaster")
+
 #: Outbound transactional mail. Receives nothing.
 #:
 #: On a sending subdomain, which carries its own SPF, DKIM and bounce

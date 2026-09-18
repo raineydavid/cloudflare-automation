@@ -74,6 +74,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        # api/seed is 720MB of film this job never opens. Leaving it
+        # on the server takes a checkout from 1.5GB to 798MB.
+        with:
+          sparse-checkout: |
+            /*
+            !/api/seed
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'
@@ -166,7 +173,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # Non-zero when any domain is not ready both ways, which is
           # the point: this should go red while mail is broken anywhere.
-          python3 scripts/mail_estate.py | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mail_estate.py | tee /tmp/estate.txt \
+            | tee -a "$GITHUB_STEP_SUMMARY"
           RC=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
@@ -328,9 +336,18 @@ jobs:
       # which is exactly when somebody wants to look at it.
       - name: Keep the snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mail-estate
           path: /tmp/mail-estate.json
           if-no-files-found: warn
           retention-days: 30
+
+      # LAST, deliberately. The step summary is not readable through the
+      # API and the artifact upload prints hundreds of lines after the
+      # report — so the verdict on a red estate could only be seen by
+      # opening the run in a browser. It is the whole output of this
+      # workflow; it should be the last thing the job says.
+      - name: The verdict, where it can be read
+        if: always()
+        run: tail -40 /tmp/estate.txt || echo "(the report produced nothing)"
